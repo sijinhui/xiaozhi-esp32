@@ -75,7 +75,15 @@ jobs:
     strategy:
       fail-fast: false  # 单个变体失败不影响其它变体
       matrix:
-        include: ${{ fromJson(needs.prepare.outputs.variants) }}
+        # This fork only packages its own two boards; prepare's change
+        # detection still skips firmware builds for docs-only changes.
+        include:
+          - board: waveshare/esp32-s3-touch-amoled-1.75
+            name: esp32-s3-touch-amoled-1.75c
+            full_name: waveshare-esp32-s3-touch-amoled-1.75c
+          - board: lckfb/szpi-esp32s3
+            name: lichuang-dev
+            full_name: lckfb-lichuang-dev
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v6.1
@@ -95,7 +103,7 @@ jobs:
           if [[ "$BUILD_OPTIONS_JSON" != "null" && -n "$BUILD_OPTIONS_JSON" ]]; then
             OPTIONS+=(--build-options-json "$BUILD_OPTIONS_JSON")
           fi
-          python scripts/build.py "$BOARD" --name "$VARIANT" "${OPTIONS[@]}"
+          python scripts/build.py "$BOARD" --name "$VARIANT" --language zh-CN "${OPTIONS[@]}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
