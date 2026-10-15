@@ -32,7 +32,9 @@ class GpioLed : public Led {
     int blink_interval_ms_ = 0;
     esp_timer_handle_t blink_timer_ = nullptr;
     bool fade_up_ = true;
-
+    TaskHandle_t event_task_handle_;
+    
+    static void EventTask(void* arg);
     void StartBlinkTask(int times, int interval_ms);
     void OnBlinkTimer();
 
@@ -41,7 +43,7 @@ class GpioLed : public Led {
     void StartContinuousBlink(int interval_ms);
     void StartFadeTask();
     void OnFadeEnd();
-    static bool FadeCallback(const ledc_cb_param_t *param, void *user_arg);
+    static bool IRAM_ATTR FadeCallback(const ledc_cb_param_t *param, void *user_arg);
 };
 
 #endif  // _GPIO_LED_H_

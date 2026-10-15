@@ -42,7 +42,7 @@
 #elif CONFIG_OLED_SSD1306_128X64
 #define DISPLAY_HEIGHT  64
 #else
-#error "未选择 OLED 屏幕类型"
+#error "OLED display type is not selected"
 #endif
 
 #define DISPLAY_MIRROR_X true
@@ -52,5 +52,8 @@
 #define ML307_RX_PIN GPIO_NUM_11
 #define ML307_TX_PIN GPIO_NUM_12
 
+
+// A MCP Test: Control a lamp
+#define LAMP_GPIO GPIO_NUM_18
 
 #endif // _BOARD_CONFIG_H_

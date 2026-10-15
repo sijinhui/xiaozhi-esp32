@@ -1,5 +1,6 @@
 #include "gpio_led.h"
 #include "application.h"
+#include "device_state.h"
 #include <esp_log.h>
 
 #define TAG "GpioLed"
@@ -80,6 +81,9 @@ GpioLed::GpioLed(gpio_num_t gpio, int output_invert, ledc_timer_t timer_num, led
         .skip_unhandled_events = false,
     };
     ESP_ERROR_CHECK(esp_timer_create(&blink_timer_args, &blink_timer_));
+
+    xTaskCreate(EventTask, "LedEvent", 2048, this, 
+            tskIDLE_PRIORITY + 2, &event_task_handle_);
 
     ledc_initialized_ = true;
 }
@@ -190,10 +194,12 @@ void GpioLed::OnFadeEnd() {
                     ledc_channel_.channel, LEDC_FADE_NO_WAIT);
 }
 
-bool GpioLed::FadeCallback(const ledc_cb_param_t *param, void *user_arg) {
+bool IRAM_ATTR GpioLed::FadeCallback(const ledc_cb_param_t *param, void *user_arg) {
     if (param->event == LEDC_FADE_END_EVT) {
         auto led = static_cast<GpioLed*>(user_arg);
-        led->OnFadeEnd();
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xTaskNotifyFromISR(led->event_task_handle_, 0x01, eSetValueWithOverwrite,
+                           &xHigherPriorityTaskWoken);
     }
     return true;
 }
@@ -220,6 +226,7 @@ void GpioLed::OnStateChanged() {
             TurnOn();
             break;
         case kDeviceStateListening:
+        case kDeviceStateAudioTesting:
             if (app.IsVoiceDetected()) {
                 SetBrightness(HIGH_BRIGHTNESS);
             } else {
@@ -229,6 +236,7 @@ void GpioLed::OnStateChanged() {
             StartFadeTask();
             break;
         case kDeviceStateSpeaking:
+        case kDeviceStateNotifying:
             SetBrightness(SPEAKING_BRIGHTNESS);
             TurnOn();
             break;
@@ -243,5 +251,14 @@ void GpioLed::OnStateChanged() {
         default:
             ESP_LOGE(TAG, "Unknown gpio led event: %d", device_state);
             return;
+    }
+}
+
+void GpioLed::EventTask(void* arg) {
+    GpioLed* led = static_cast<GpioLed*>(arg);
+
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        led->OnFadeEnd();
     }
 }
