@@ -23,6 +23,13 @@
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iterator>
+#include <string>
+#include <vector>
+
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
 
 class Pmic : public Axp2101 {
@@ -116,10 +123,309 @@ public:
         SpiLcdDisplay::SetupUI();
 
         DisplayLockGuard lock(this);
+        lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#if CONFIG_USE_WECHAT_MESSAGE_STYLE
         lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES*  0.1, 0);
         lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES*  0.1, 0);
-        lv_display_add_event_cb(display_, rounder_event_cb, LV_EVENT_INVALIDATE_AREA, NULL);
+#else
+        ApplyRoundStyles();
+        UpdateRoundLayout(true);
+#endif
     }
+
+#if !CONFIG_USE_WECHAT_MESSAGE_STYLE
+    // Round 466x466 panel: the emoji stays at the centre, the subtitle sits under it
+    // with each line as wide as the circle allows at that height.
+    virtual void SetChatMessage(const char* role, const char* content) override {
+        DisplayLockGuard lock(this);
+        chat_text_ = content != nullptr ? content : "";
+        SpiLcdDisplay::SetChatMessage(role, content);
+        UpdateRoundLayout(false);
+        RefreshSubtitle();
+    }
+
+    virtual void RemoveChatMessage(const char* role, const char* content) override {
+        DisplayLockGuard lock(this);
+        // The label holds the wrapped text, so compare against what was received
+        if (content == nullptr || chat_text_ != content) {
+            return;
+        }
+        chat_text_.clear();
+        SpiLcdDisplay::SetChatMessage(role, "");
+        RefreshSubtitle();
+    }
+
+    virtual void ClearChatMessages() override {
+        DisplayLockGuard lock(this);
+        chat_text_.clear();
+        SpiLcdDisplay::ClearChatMessages();
+        RefreshSubtitle();
+    }
+
+    virtual void SetHideSubtitle(bool hide) override {
+        DisplayLockGuard lock(this);
+        SpiLcdDisplay::SetHideSubtitle(hide);
+        RefreshSubtitle();
+    }
+
+    virtual void SetEmotion(const char* emotion) override {
+        DisplayLockGuard lock(this);
+        SpiLcdDisplay::SetEmotion(emotion);
+        // A bigger emoji pushes the subtitle lines down; only then re-wrap
+        if (UpdateRoundLayout(false)) {
+            RefreshSubtitle();
+        }
+    }
+
+    virtual void SetTheme(Theme* theme) override {
+        DisplayLockGuard lock(this);
+        SpiLcdDisplay::SetTheme(theme);
+        if (bottom_bar_ != nullptr) {
+            lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_TRANSP, 0);
+        }
+        // A theme pack swaps the fonts, so every measured height changes
+        UpdateRoundLayout(true);
+        RefreshSubtitle();
+    }
+
+private:
+    static constexpr int kEdgeMargin = 12;  // text stays this far inside the panel edge
+    static constexpr int kPillMargin = 20;  // extra room between the icon pill and the arc
+    static constexpr int kRowGap = 8;       // between the icon pill and the status line
+    static constexpr int kTextGap = 10;     // between the emoji and the subtitle
+    static constexpr int kEmojiSlot = 128;  // size of the theme's emoji images
+
+    std::string chat_text_;         // subtitle as received, before wrapping
+    std::vector<int> line_widths_;  // widest each subtitle line may be, top line first
+    int text_top_ = 0;
+    int line_height_ = 0;
+
+    // Half-length of the chord at distance d from the centre, on the circle shrunk
+    // by margin. Gives both the half width that fits at a given height and the
+    // vertical reach of a box with a given half width.
+    int CircleExtent(int d, int margin) const {
+        int r = width_ / 2 - margin;
+        d = std::abs(d);
+        return d >= r ? 0 : static_cast<int>(sqrtf(static_cast<float>(r * r - d * d)));
+    }
+
+    // One-time restyling of the objects created by LcdDisplay::SetupUI(). Fonts are
+    // inherited from the screen, never cached here: a theme pack frees the old ones.
+    void ApplyRoundStyles() {
+        // Status icons: a compact pill on the top arc instead of a full-width bar
+        lv_obj_set_width(top_bar_, LV_SIZE_CONTENT);
+        lv_obj_set_style_radius(top_bar_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_pad_left(top_bar_, 14, 0);
+        lv_obj_set_style_pad_right(top_bar_, 14, 0);
+        lv_obj_set_style_pad_column(top_bar_, 8, 0);
+        lv_obj_set_flex_align(top_bar_, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                              LV_FLEX_ALIGN_CENTER);
+
+        // Status and notification text share one line under the icons
+        lv_label_set_long_mode(notification_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
+
+        // Subtitle: a transparent clip area under the emoji. The label is as wide as
+        // its longest line; RefreshSubtitle() inserts the line breaks.
+        lv_obj_set_style_bg_opa(bottom_bar_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_pad_all(bottom_bar_, 0, 0);
+        lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_width(chat_message_label_, LV_SIZE_CONTENT);
+        lv_label_set_long_mode(chat_message_label_, LV_LABEL_LONG_WRAP);
+        lv_obj_align(chat_message_label_, LV_ALIGN_TOP_MID, 0, 0);
+
+        // Low battery popup: narrower and lifted so its corners stay on the panel
+        int popup_w = width_ * 64 / 100;
+        lv_obj_set_width(low_battery_popup_, popup_w);
+        lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0,
+                     -(height_ / 2 - CircleExtent(popup_w / 2, kEdgeMargin)));
+    }
+
+    // Places the pill, the status line and the subtitle area from measured sizes.
+    // Returns true when the subtitle line slots changed.
+    bool UpdateRoundLayout(bool log_layout) {
+        if (top_bar_ == nullptr || status_bar_ == nullptr || emoji_box_ == nullptr ||
+            bottom_bar_ == nullptr || chat_message_label_ == nullptr) {
+            return false;
+        }
+        const int cy = height_ / 2;
+        lv_obj_update_layout(top_bar_);
+
+        // Leave room for one more icon (e.g. mute) so the pill never nears the arc
+        int pill_h = lv_obj_get_height(top_bar_);
+        int pill_w = lv_obj_get_width(top_bar_) + pill_h;
+        int pill_y = cy - CircleExtent(pill_w / 2, kPillMargin);
+        lv_obj_align(top_bar_, LV_ALIGN_TOP_MID, 0, pill_y);
+
+        // The status line is as wide as the circle allows at its top edge
+        int status_y = pill_y + pill_h + kRowGap;
+        int status_w = 2 * CircleExtent(cy - status_y, kEdgeMargin);
+        lv_obj_set_width(status_bar_, status_w);
+        lv_obj_set_width(status_label_, status_w);
+        lv_obj_set_width(notification_label_, status_w);
+        lv_obj_align(status_bar_, LV_ALIGN_TOP_MID, 0, status_y);
+        lv_obj_update_layout(status_bar_);
+        int status_h = lv_obj_get_height(status_bar_);
+
+        // Subtitle lines start under the centred emoji. Each line may be as wide as the
+        // chord at its lower edge, so the text block follows the lower arc.
+        const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
+        int line_h = std::max<int>(
+            1, font->line_height +
+                   lv_obj_get_style_text_line_space(chat_message_label_, LV_PART_MAIN));
+        int emoji_h = lv_obj_get_height(emoji_box_);
+        int text_top = cy + std::max(emoji_h, kEmojiSlot) / 2 + kTextGap;
+        std::vector<int> widths;
+        for (int bottom = text_top + line_h; bottom - cy < width_ / 2; bottom += line_h) {
+            int w = 2 * CircleExtent(bottom - cy, kEdgeMargin);
+            if (w < width_ * 45 / 100) {
+                break;  // Too narrow to be worth a line
+            }
+            widths.push_back(w);
+        }
+        if (widths.empty()) {
+            widths.push_back(std::max(2 * CircleExtent(text_top - cy, kEdgeMargin), 4 * line_h));
+        }
+        // The clip area is wider than the top line so closing punctuation that may run
+        // past a line's width is not cut; the margin keeps it on the panel.
+        lv_obj_set_size(bottom_bar_, widths.front() + 2 * kEdgeMargin,
+                        line_h * static_cast<int>(widths.size()));
+        lv_obj_align(bottom_bar_, LV_ALIGN_TOP_MID, 0, text_top);
+
+        if (log_layout) {
+            ESP_LOGI(TAG,
+                     "Round layout: pill y=%d-%d, status y=%d-%d w=%d, emoji y=%d-%d, "
+                     "subtitle y=%d-%d, %d lines %d..%dpx",
+                     pill_y, pill_y + pill_h, status_y, status_y + status_h, status_w,
+                     cy - emoji_h / 2, cy + emoji_h / 2, text_top,
+                     text_top + line_h * static_cast<int>(widths.size()),
+                     static_cast<int>(widths.size()), widths.front(), widths.back());
+        }
+        bool changed = text_top != text_top_ || line_h != line_height_ || widths != line_widths_;
+        text_top_ = text_top;
+        line_height_ = line_h;
+        line_widths_ = std::move(widths);
+        return changed;
+    }
+
+    // Decodes the UTF-8 code point at s[i] and advances i; a bad byte counts as one.
+    static uint32_t NextCodepoint(const std::string& s, size_t& i) {
+        unsigned char c = s[i];
+        size_t len = 1;
+        if ((c >> 5) == 0x6) {
+            len = 2;
+        } else if ((c >> 4) == 0xE) {
+            len = 3;
+        } else if ((c >> 3) == 0x1E) {
+            len = 4;
+        }
+        if (i + len > s.size()) {
+            len = 1;
+        }
+        uint32_t cp = len == 1 ? c : c & (0x7F >> len);
+        for (size_t k = 1; k < len; k++) {
+            cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+        }
+        i += len;
+        return cp;
+    }
+
+    // Closing punctuation stays at the end of the previous line instead of starting one
+    static bool NoLineStart(uint32_t cp) {
+        static const uint32_t kClosing[] = {
+            ',',    '.',    '!',    '?',    ';',    ':',    ')',    ']',
+            0x2026, 0x3001, 0x3002, 0x300B, 0x300D, 0x300F, 0x3011, 0xFF01,
+            0xFF09, 0xFF0C, 0xFF1A, 0xFF1B, 0xFF1F, 0xFF5E,
+        };
+        return std::find(std::begin(kClosing), std::end(kClosing), cp) != std::end(kClosing);
+    }
+
+    // Greedy line breaking where line n may be at most widths[n] wide (lines past the
+    // end use the last width). CJK text breaks anywhere, Latin words at spaces.
+    static std::string WrapToWidths(const std::string& text, const lv_font_t* font,
+                                    const std::vector<int>& widths) {
+        std::string out;
+        size_t i = 0;
+        size_t line = 0;
+        while (i < text.size()) {
+            const int max_w = widths[std::min(line, widths.size() - 1)];
+            const size_t start = i;
+            size_t end = text.size();
+            size_t next_start = text.size();
+            size_t space_break = std::string::npos;
+            int w = 0;
+            while (i < text.size()) {
+                size_t j = i;
+                uint32_t cp = NextCodepoint(text, j);
+                if (cp == '\n') {
+                    end = i;
+                    next_start = j;
+                    break;
+                }
+                size_t k = j;
+                uint32_t next = k < text.size() ? NextCodepoint(text, k) : 0;
+                int glyph_w = lv_font_get_glyph_width(font, cp, next);
+                if (w + glyph_w > max_w && i > start && !NoLineStart(cp)) {
+                    bool mid_word = cp < 0x80 && cp != ' ' && space_break != std::string::npos;
+                    end = mid_word ? space_break : i;
+                    next_start = end;
+                    break;
+                }
+                w += glyph_w;
+                i = j;
+                if (cp == ' ') {
+                    space_break = i;
+                }
+            }
+            while (end > start && text[end - 1] == ' ') {
+                end--;
+            }
+            out.append(text, start, end - start);
+            i = next_start;
+            while (i < text.size() && text[i] == ' ') {
+                i++;
+            }
+            if (i < text.size()) {
+                out += '\n';
+            }
+            line++;
+        }
+        return out;
+    }
+
+    static void SetTranslateY(void* obj, int32_t v) {
+        lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), v, 0);
+    }
+
+    // Re-wraps the subtitle into the current line slots. Text taller than the slots
+    // starts at the top and, after a pause, slides up until the last line shows.
+    void RefreshSubtitle() {
+        if (bottom_bar_ == nullptr || chat_message_label_ == nullptr || line_widths_.empty()) {
+            return;
+        }
+        lv_anim_delete(chat_message_label_, SetTranslateY);
+        lv_obj_set_style_translate_y(chat_message_label_, 0, 0);
+        const lv_font_t* font = lv_obj_get_style_text_font(chat_message_label_, LV_PART_MAIN);
+        std::string wrapped = WrapToWidths(chat_text_, font, line_widths_);
+        lv_label_set_text(chat_message_label_, wrapped.c_str());
+        if (lv_obj_has_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN)) {
+            return;
+        }
+        lv_obj_update_layout(bottom_bar_);
+        int overflow =
+            lv_obj_get_height(chat_message_label_) - lv_obj_get_content_height(bottom_bar_);
+        if (overflow <= 0) {
+            return;
+        }
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, chat_message_label_);
+        lv_anim_set_exec_cb(&a, SetTranslateY);
+        lv_anim_set_values(&a, 0, -overflow);
+        lv_anim_set_delay(&a, 1500);
+        lv_anim_set_duration(&a, overflow * 80);  // ~12 px/s, about a line every 2-3 s
+        lv_anim_start(&a);
+    }
+#endif
 };
 
 class CustomBacklight : public Backlight {
