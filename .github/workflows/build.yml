@@ -78,9 +78,11 @@ jobs:
         # This fork only packages its own two boards; prepare's change
         # detection still skips firmware builds for docs-only changes.
         include:
+          # 32MB layout (16MB assets) so large custom themes fit; separate
+          # name keeps official 16MB OTA images off these devices.
           - board: waveshare/esp32-s3-touch-amoled-1.75
-            name: esp32-s3-touch-amoled-1.75c
-            full_name: waveshare-esp32-s3-touch-amoled-1.75c
+            name: esp32-s3-touch-amoled-1.75c-32m
+            full_name: waveshare-esp32-s3-touch-amoled-1.75c-32m
           - board: lckfb/szpi-esp32s3
             name: lichuang-dev
             full_name: lckfb-lichuang-dev
