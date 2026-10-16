@@ -1046,7 +1046,7 @@ private:
     }
 
     // ---- Watch face: while idle with no text, the time sits left of the emoji,
-    // the date right of it and battery and volume below
+    // the date right of it at the same size, and weekday, battery and volume below
 
     static constexpr int kFaceSideOffset = 138;  // centre of each side column
 
@@ -1064,12 +1064,12 @@ private:
     }
 
     void SetupWatchFace() {
-        // The built-in font has digits at a large size and never gets freed by a
-        // theme pack; the date uses the theme's text font for the CJK characters
+        // Time and date share the built-in font: digits at a large size, never
+        // freed by a theme pack. The line below uses the theme's font for CJK.
         face_time_ = CreateFaceLabel();
         lv_obj_set_style_text_font(face_time_, &BUILTIN_TEXT_FONT, 0);
         face_date_ = CreateFaceLabel();
-        lv_obj_set_style_text_opa(face_date_, LV_OPA_80, 0);
+        lv_obj_set_style_text_font(face_date_, &BUILTIN_TEXT_FONT, 0);
         face_info_ = CreateFaceLabel();
         lv_obj_set_style_text_opa(face_info_, LV_OPA_60, 0);
     }
@@ -1113,19 +1113,24 @@ private:
         }
         lv_label_set_text(face_time_, buf);
         if (clock_set) {
-            snprintf(buf, sizeof(buf), "%d月%d日\n周%s", tm_now->tm_mon + 1, tm_now->tm_mday,
-                     kWeekdays[tm_now->tm_wday]);
+            snprintf(buf, sizeof(buf), "%d/%d", tm_now->tm_mon + 1, tm_now->tm_mday);
         } else {
-            buf[0] = '\0';
+            strcpy(buf, "--/--");
         }
         lv_label_set_text(face_date_, buf);
-        int volume = Board::GetInstance().GetAudioCodec()->output_volume();
-        if (battery_level_ >= 0) {
-            snprintf(buf, sizeof(buf), "电量 %d%%  ·  音量 %d", battery_level_, volume);
-        } else {
-            snprintf(buf, sizeof(buf), "音量 %d", volume);
+
+        std::string info;
+        if (clock_set) {
+            info = std::string("周") + kWeekdays[tm_now->tm_wday];
         }
-        lv_label_set_text(face_info_, buf);
+        if (battery_level_ >= 0) {
+            snprintf(buf, sizeof(buf), "电量 %d%%", battery_level_);
+            info += (info.empty() ? "" : "  ·  ") + std::string(buf);
+        }
+        snprintf(buf, sizeof(buf), "音量 %d",
+                 Board::GetInstance().GetAudioCodec()->output_volume());
+        info += (info.empty() ? "" : "  ·  ") + std::string(buf);
+        lv_label_set_text(face_info_, info.c_str());
 
         lv_obj_align(face_time_, LV_ALIGN_CENTER, -kFaceSideOffset, 0);
         lv_obj_align(face_date_, LV_ALIGN_CENTER, kFaceSideOffset, 0);
