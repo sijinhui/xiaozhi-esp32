@@ -406,8 +406,9 @@ private:
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
     static constexpr int kEdgeMargin = 12;       // status text stays this far inside the edge
-    static constexpr int kTextMargin = 8;        // chat lines may run this close to the edge
-    static constexpr int kMinLineWidth = 110;    // narrower slots on the bottom arc are unused
+    static constexpr int kTextMargin = 24;       // chat lines keep this far inside the edge
+    static constexpr int kPunctSlack = 8;        // closing punctuation may overrun a line by this
+    static constexpr int kMinLineWidth = 130;    // narrower slots on the bottom arc are unused
     static constexpr int kPillMargin = 20;       // extra room between the icon pill and the arc
     static constexpr int kRowGap = 8;            // between the icon pill and the status line
     static constexpr int kTextGap = 8;           // between the emoji and the first line
@@ -567,16 +568,16 @@ private:
         line_height_ = line_h;
         line_widths_ = std::move(widths);
 
-        // One label per line slot. The labels get the margin as slack, so closing
-        // punctuation allowed past a line's width is not cut.
+        // One label per line slot, with some slack so closing punctuation allowed
+        // past a line's width is not cut.
         lv_obj_clean(text_box_);
         line_labels_.clear();
-        int box_w = line_widths_.front() + 2 * kTextMargin;
+        int box_w = line_widths_.front() + 2 * kPunctSlack;
         lv_obj_set_size(text_box_, box_w, line_h * static_cast<int>(line_widths_.size()));
         lv_obj_align(text_box_, LV_ALIGN_TOP_MID, 0, text_top);
         for (size_t i = 0; i < line_widths_.size(); i++) {
             lv_obj_t* label = lv_label_create(text_box_);
-            lv_obj_set_width(label, line_widths_[i] + 2 * kTextMargin);
+            lv_obj_set_width(label, line_widths_[i] + 2 * kPunctSlack);
             lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
             lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
             lv_label_set_text(label, "");
