@@ -1,5 +1,6 @@
 #include "wifi_board.h"
 #include "display/lcd_display.h"
+#include "display/lvgl_display/lvgl_theme.h"
 #include "esp_lcd_co5300.h"
 
 #include "codecs/box_audio_codec.h"
