@@ -15,11 +15,23 @@ permissions:
   contents: read
 
 jobs:
-  prepare:
-    name: Determine variants to build
+  # 工具脚本的单元测试单独跑，和编译并行，不再挡在编译前面。
+  test-tooling:
+    name: Test build tooling
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v6.1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Test build tooling
+        run: python -m unittest discover -s scripts/tests -v
+
+  # 只判断要不要编译，不拉 IDF 镜像（拉镜像就要 1 分半）。
+  prepare:
+    name: Determine variants to build
+    runs-on: ubuntu-latest
     outputs:
       variants: ${{ steps.select.outputs.variants }}
     steps:
@@ -28,9 +40,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Test build tooling
-        run: python -m unittest discover -s scripts/tests -v
-
       - id: select
         name: Select variants based on changes
         shell: bash
@@ -38,7 +47,13 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # build.py 从 $IDF_PATH/tools/cmake/version.cmake 读 IDF 版本来挑板子；
+          # 这里没有 IDF，只放一个版本文件，和下面编译用的 release-v6.1 镜像对齐。
+          export IDF_PATH="$RUNNER_TEMP/idf-version-only"
+          mkdir -p "$IDF_PATH/tools/cmake"
+          printf 'set(IDF_VERSION_MAJOR 6)\nset(IDF_VERSION_MINOR 1)\nset(IDF_VERSION_PATCH 0)\n' \
+            > "$IDF_PATH/tools/cmake/version.cmake"
+
           CHANGED_FILE="$RUNNER_TEMP/changed-files.txt"
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             git ls-files > "$CHANGED_FILE"
@@ -62,7 +77,7 @@ jobs:
           cat "$CHANGED_FILE"
 
           # Keep the full manual matrix out of environment variables.
-          python scripts/build.py --select-changed < "$CHANGED_FILE" > "$RUNNER_TEMP/variants.json"
+          python3 scripts/build.py --select-changed < "$CHANGED_FILE" > "$RUNNER_TEMP/variants.json"
           {
             printf 'variants='
             cat "$RUNNER_TEMP/variants.json"
@@ -89,9 +104,35 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:release-v6.1
+    env:
+      # 镜像已开 IDF_CCACHE_ENABLE=1，这里把 ccache 目录固定下来，
+      # 由 actions/cache 在任务之间保存和恢复（容器里 HOME 是 /github/home）。
+      CCACHE_DIR: /github/home/.ccache
+      CCACHE_MAXSIZE: 1G
+      # IDF 6.1 每次编译都会重新生成 build/specs/picolibc.specs 并用 -specs= 传给 gcc；
+      # ccache 默认按修改时间校验 specs 文件，换一台机器就全部不命中，所以改成按内容校验。
+      CCACHE_COMPILERCHECK: content
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Cache keys
+        id: keys
+        shell: bash
+        run: |
+          # 镜像里的 IDF 换了提交时，编译缓存大多用不上，分开存
+          IDF_REV=$(git -c safe.directory='*' -C "$IDF_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)
+          echo "idf=$IDF_REV" >> "$GITHUB_OUTPUT"
+
+      # 每次编译都存一份新的，下次从同一块板子最近的一份接着用
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: /github/home/.ccache
+          key: ccache-${{ matrix.full_name }}-${{ steps.keys.outputs.idf }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-${{ matrix.full_name }}-${{ steps.keys.outputs.idf }}-
+            ccache-${{ matrix.full_name }}-
 
       - name: Build current variant
         shell: bash
@@ -105,7 +146,17 @@ jobs:
           if [[ "$BUILD_OPTIONS_JSON" != "null" && -n "$BUILD_OPTIONS_JSON" ]]; then
             OPTIONS+=(--build-options-json "$BUILD_OPTIONS_JSON")
           fi
+          ccache --zero-stats
           python scripts/build.py "$BOARD" --name "$VARIANT" --language zh-CN "${OPTIONS[@]}"
+
+      - name: ccache stats
+        shell: bash
+        run: |
+          command -v ccache >/dev/null || source "$IDF_PATH/export.sh" >/dev/null
+          ccache --show-stats --verbose
+          # 只留这次编译用到的条目，缓存不会越存越大
+          ccache --evict-older-than 7200s
+          ccache --show-stats
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
