@@ -1046,12 +1046,14 @@ private:
     }
 
     // ---- Watch face: while idle with no text, the time sits left of the emoji,
-    // the date right of it at the same size, and weekday, battery and volume below
+    // the date right of it at the same size with the weekday under it, and battery
+    // and volume below
 
     static constexpr int kFaceSideOffset = 138;  // centre of each side column
 
     lv_obj_t* face_time_ = nullptr;
     lv_obj_t* face_date_ = nullptr;
+    lv_obj_t* face_weekday_ = nullptr;
     lv_obj_t* face_info_ = nullptr;
     bool face_visible_ = false;
 
@@ -1070,6 +1072,8 @@ private:
         lv_obj_set_style_text_font(face_time_, &BUILTIN_TEXT_FONT, 0);
         face_date_ = CreateFaceLabel();
         lv_obj_set_style_text_font(face_date_, &BUILTIN_TEXT_FONT, 0);
+        face_weekday_ = CreateFaceLabel();
+        lv_obj_set_style_text_opa(face_weekday_, LV_OPA_80, 0);
         face_info_ = CreateFaceLabel();
         lv_obj_set_style_text_opa(face_info_, LV_OPA_60, 0);
     }
@@ -1082,7 +1086,7 @@ private:
                     Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
         if (show != face_visible_) {
             face_visible_ = show;
-            for (lv_obj_t* label : {face_time_, face_date_, face_info_}) {
+            for (lv_obj_t* label : {face_time_, face_date_, face_weekday_, face_info_}) {
                 if (show) {
                     lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
                 } else {
@@ -1097,7 +1101,7 @@ private:
             return;
         }
         auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-        for (lv_obj_t* label : {face_time_, face_date_, face_info_}) {
+        for (lv_obj_t* label : {face_time_, face_date_, face_weekday_, face_info_}) {
             lv_obj_set_style_text_color(label, lvgl_theme->text_color(), 0);
         }
 
@@ -1119,10 +1123,10 @@ private:
         }
         lv_label_set_text(face_date_, buf);
 
+        lv_label_set_text(face_weekday_,
+                          clock_set ? (std::string("周") + kWeekdays[tm_now->tm_wday]).c_str() : "");
+
         std::string info;
-        if (clock_set) {
-            info = std::string("周") + kWeekdays[tm_now->tm_wday];
-        }
         if (battery_level_ >= 0) {
             snprintf(buf, sizeof(buf), "电量 %d%%", battery_level_);
             info += (info.empty() ? "" : "  ·  ") + std::string(buf);
@@ -1134,6 +1138,8 @@ private:
 
         lv_obj_align(face_time_, LV_ALIGN_CENTER, -kFaceSideOffset, 0);
         lv_obj_align(face_date_, LV_ALIGN_CENTER, kFaceSideOffset, 0);
+        lv_obj_update_layout(face_date_);
+        lv_obj_align_to(face_weekday_, face_date_, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
         lv_obj_align(face_info_, LV_ALIGN_TOP_MID, 0, text_top_);
     }
 #endif
