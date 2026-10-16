@@ -14,6 +14,7 @@
 #include "i2c_device.h"
 
 #include <esp_log.h>
+#include <esp_random.h>
 #include <esp_lcd_panel_vendor.h>
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
@@ -26,9 +27,11 @@
 #include <material_symbols.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
 #include <functional>
 #include <iterator>
@@ -36,6 +39,55 @@
 #include <vector>
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
+
+LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
+
+// Measures loudness on the way in and out, for the voice bars beside the emoji
+class MeteredAudioCodec : public BoxAudioCodec {
+public:
+    using BoxAudioCodec::BoxAudioCodec;
+
+    // 0..100, from the microphone and towards the speaker
+    int input_level() const { return input_level_; }
+    int output_level() const { return output_level_; }
+
+    virtual bool InputData(std::vector<int16_t>& data) override {
+        bool ok = BoxAudioCodec::InputData(data);
+        if (ok) {
+            input_level_ = Level(data, input_channels());
+        }
+        return ok;
+    }
+
+    virtual void OutputData(std::vector<int16_t>& data) override {
+        output_level_ = Level(data, output_channels());
+        BoxAudioCodec::OutputData(data);
+    }
+
+private:
+    std::atomic<int> input_level_{0};
+    std::atomic<int> output_level_{0};
+
+    // RMS of the first channel (the microphone when a reference rides along),
+    // mapped from -50..-10 dBFS onto 0..100
+    static int Level(const std::vector<int16_t>& data, int channels) {
+        channels = std::max(channels, 1);
+        if (data.size() < static_cast<size_t>(channels)) {
+            return 0;
+        }
+        int64_t sum = 0;
+        size_t n = 0;
+        for (size_t i = 0; i < data.size(); i += channels, n++) {
+            sum += static_cast<int32_t>(data[i]) * data[i];
+        }
+        float rms = sqrtf(static_cast<float>(sum) / n);
+        if (rms < 1) {
+            return 0;
+        }
+        float db = 20 * log10f(rms / 32768);
+        return std::clamp(static_cast<int>((db + 50) * 100 / 40), 0, 100);
+    }
+};
 
 class Pmic : public Axp2101 {
 public:
@@ -147,10 +199,19 @@ public:
         on_volume_change_ = std::move(callback);
     }
 
+    // Loudness 0..100 of the microphone (true) or the speaker (false)
+    void SetAudioLevelSource(std::function<int(bool)> source) {
+        audio_level_ = std::move(source);
+    }
+
     // The base only shows an icon when muted; this one always shows the level
     virtual void UpdateStatusBar(bool update_all = false) override {
         SpiLcdDisplay::UpdateStatusBar(update_all);
+        int level;
+        bool charging, discharging;
+        bool has_battery = Board::GetInstance().GetBatteryLevel(level, charging, discharging);
         DisplayLockGuard lock(this);
+        battery_level_ = has_battery ? level : -1;
         RefreshVolumeIcon(Board::GetInstance().GetAudioCodec()->output_volume());
     }
 
@@ -225,6 +286,8 @@ private:
 
     std::function<void()> on_emoji_tap_;
     std::function<void(int)> on_volume_change_;
+    std::function<int(bool)> audio_level_;
+    int battery_level_ = -1;
     lv_point_t emoji_press_point_ = {0, 0};
     lv_obj_t* volume_arc_ = nullptr;
     lv_obj_t* volume_label_ = nullptr;
@@ -505,6 +568,9 @@ private:
         type_timer_ = lv_timer_create(OnTypeTimer, kTypeTickMs, this);
         lv_timer_pause(type_timer_);
         hide_timer_ = lv_timer_create(OnHideTimer, 1000, this);
+
+        SetupVoiceBars();
+        SetupWatchFace();
     }
 
     // Places the pill, the status line and the chat lines from measured sizes.
@@ -776,6 +842,7 @@ private:
         }
         text_visible_ = true;
         lv_obj_remove_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
+        UpdateWatchFace();
     }
 
     void HideText() {
@@ -784,6 +851,7 @@ private:
         }
         text_visible_ = false;
         lv_obj_add_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
+        UpdateWatchFace();
         // Next time it shows, start from the newest page
         if (!following_ && !pages_.empty()) {
             following_ = true;
@@ -862,6 +930,7 @@ private:
     // Hides the text once the device is idle and nobody has touched it for a while
     static void OnHideTimer(lv_timer_t* timer) {
         auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+        self->UpdateWatchFace();
         if (!self->text_visible_ ||
             Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
             self->last_content_tick_ = lv_tick_get();
@@ -896,6 +965,171 @@ private:
         self->following_ = self->page_ == last;
         self->RenderPage();
         self->last_content_tick_ = lv_tick_get();
+    }
+
+    // ---- Voice bars: either side of the emoji, following the microphone while
+    // listening and the speaker while speaking
+
+    static constexpr int kBarCount = 6;          // per side
+    static constexpr int kBarInner = 84;         // first bar, from the centre
+    static constexpr int kBarPitch = 14;
+    static constexpr int kBarWidth = 6;
+    static constexpr int kBarMinHeight = 6;
+    static constexpr int kBarMaxHeight = 56;
+    static constexpr uint32_t kBarTickMs = 50;
+
+    lv_obj_t* bars_[2 * kBarCount] = {};
+    lv_timer_t* bar_timer_ = nullptr;
+    int bar_level_ = 0;  // smoothed: rises at once, falls gently
+    bool bars_visible_ = false;
+
+    void SetupVoiceBars() {
+        lv_obj_t* screen = lv_screen_active();
+        for (int side = 0; side < 2; side++) {
+            for (int i = 0; i < kBarCount; i++) {
+                lv_obj_t* bar = lv_obj_create(screen);
+                lv_obj_remove_flag(bar, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_remove_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+                lv_obj_set_style_border_width(bar, 0, 0);
+                lv_obj_set_style_pad_all(bar, 0, 0);
+                lv_obj_set_style_radius(bar, kBarWidth / 2, 0);
+                lv_obj_set_style_bg_opa(bar, 230 - i * 30, 0);
+                int x = (side == 0 ? -1 : 1) * (kBarInner + i * kBarPitch);
+                lv_obj_set_size(bar, kBarWidth, kBarMinHeight);
+                lv_obj_align(bar, LV_ALIGN_CENTER, x, 0);
+                lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+                bars_[side * kBarCount + i] = bar;
+            }
+        }
+        bar_timer_ = lv_timer_create(OnBarTimer, kBarTickMs, this);
+    }
+
+    void SetBarsVisible(bool visible) {
+        if (visible == bars_visible_) {
+            return;
+        }
+        bars_visible_ = visible;
+        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        for (lv_obj_t* bar : bars_) {
+            if (visible) {
+                lv_obj_set_style_bg_color(bar, lvgl_theme->text_color(), 0);
+                lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        bar_level_ = 0;
+    }
+
+    static void OnBarTimer(lv_timer_t* timer) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+        auto state = Application::GetInstance().GetDeviceState();
+        bool listening = state == kDeviceStateListening;
+        bool speaking = state == kDeviceStateSpeaking;
+        self->SetBarsVisible((listening || speaking) && self->audio_level_ != nullptr);
+        if (!self->bars_visible_) {
+            return;
+        }
+        int level = self->audio_level_(listening);
+        self->bar_level_ = std::max(level, self->bar_level_ * 4 / 5);
+        // Taller in the middle of each group, with a little jitter so it looks alive
+        static const int kShape[kBarCount] = {45, 75, 100, 70, 90, 50};
+        for (int side = 0; side < 2; side++) {
+            for (int i = 0; i < kBarCount; i++) {
+                int jitter = 85 + static_cast<int>(esp_random() % 31);
+                int h = kBarMinHeight + (kBarMaxHeight - kBarMinHeight) * self->bar_level_ *
+                                            kShape[i] / 100 * jitter / 100 / 100;
+                h = std::clamp(h, kBarMinHeight, kBarMaxHeight);
+                lv_obj_set_height(self->bars_[side * kBarCount + i], h);
+            }
+        }
+    }
+
+    // ---- Watch face: while idle with no text, the time sits left of the emoji,
+    // the date right of it and battery and volume below
+
+    static constexpr int kFaceSideOffset = 138;  // centre of each side column
+
+    lv_obj_t* face_time_ = nullptr;
+    lv_obj_t* face_date_ = nullptr;
+    lv_obj_t* face_info_ = nullptr;
+    bool face_visible_ = false;
+
+    lv_obj_t* CreateFaceLabel() {
+        lv_obj_t* label = lv_label_create(lv_screen_active());
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(label, "");
+        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+        return label;
+    }
+
+    void SetupWatchFace() {
+        // The built-in font has digits at a large size and never gets freed by a
+        // theme pack; the date uses the theme's text font for the CJK characters
+        face_time_ = CreateFaceLabel();
+        lv_obj_set_style_text_font(face_time_, &BUILTIN_TEXT_FONT, 0);
+        face_date_ = CreateFaceLabel();
+        lv_obj_set_style_text_opa(face_date_, LV_OPA_80, 0);
+        face_info_ = CreateFaceLabel();
+        lv_obj_set_style_text_opa(face_info_, LV_OPA_60, 0);
+    }
+
+    void UpdateWatchFace() {
+        if (face_time_ == nullptr) {
+            return;
+        }
+        bool show = !text_visible_ &&
+                    Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
+        if (show != face_visible_) {
+            face_visible_ = show;
+            for (lv_obj_t* label : {face_time_, face_date_, face_info_}) {
+                if (show) {
+                    lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+                }
+            }
+            // The big clock replaces the small one in the status line;
+            // notifications still show there
+            lv_obj_set_style_text_opa(status_label_, show ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+        }
+        if (!show) {
+            return;
+        }
+        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        for (lv_obj_t* label : {face_time_, face_date_, face_info_}) {
+            lv_obj_set_style_text_color(label, lvgl_theme->text_color(), 0);
+        }
+
+        time_t now = time(nullptr);
+        struct tm* tm_now = localtime(&now);
+        bool clock_set = tm_now->tm_year >= 2025 - 1900;
+        static const char* const kWeekdays[] = {"日", "一", "二", "三", "四", "五", "六"};
+        char buf[64];
+        if (clock_set) {
+            strftime(buf, sizeof(buf), "%H:%M", tm_now);
+        } else {
+            strcpy(buf, "--:--");
+        }
+        lv_label_set_text(face_time_, buf);
+        if (clock_set) {
+            snprintf(buf, sizeof(buf), "%d月%d日\n周%s", tm_now->tm_mon + 1, tm_now->tm_mday,
+                     kWeekdays[tm_now->tm_wday]);
+        } else {
+            buf[0] = '\0';
+        }
+        lv_label_set_text(face_date_, buf);
+        int volume = Board::GetInstance().GetAudioCodec()->output_volume();
+        if (battery_level_ >= 0) {
+            snprintf(buf, sizeof(buf), "电量 %d%%  ·  音量 %d", battery_level_, volume);
+        } else {
+            snprintf(buf, sizeof(buf), "音量 %d", volume);
+        }
+        lv_label_set_text(face_info_, buf);
+
+        lv_obj_align(face_time_, LV_ALIGN_CENTER, -kFaceSideOffset, 0);
+        lv_obj_align(face_date_, LV_ALIGN_CENTER, kFaceSideOffset, 0);
+        lv_obj_align(face_info_, LV_ALIGN_TOP_MID, 0, text_top_);
     }
 #endif
 };
@@ -1090,6 +1324,10 @@ private:
         display_->OnEmojiTap([this]() {
             Application::GetInstance().Schedule([this]() { HandleChatClick(); });
         });
+        display_->SetAudioLevelSource([this](bool input) {
+            auto codec = static_cast<MeteredAudioCodec*>(GetAudioCodec());
+            return input ? codec->input_level() : codec->output_level();
+        });
         display_->OnVolumeChange([this](int volume) {
             Application::GetInstance().Schedule([this, volume]() {
                 GetAudioCodec()->SetOutputVolume(volume);
@@ -1125,7 +1363,7 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static BoxAudioCodec audio_codec(
+        static MeteredAudioCodec audio_codec(
             i2c_bus_, 
             AUDIO_INPUT_SAMPLE_RATE, 
             AUDIO_OUTPUT_SAMPLE_RATE,
