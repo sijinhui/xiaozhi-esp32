@@ -31,7 +31,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <deque>
 #include <functional>
 #include <iterator>
@@ -39,8 +38,6 @@
 #include <vector>
 
 #define TAG "WaveshareEsp32s3TouchAMOLED1inch75"
-
-LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 
 // Measures loudness on the way in and out, for the voice bars beside the emoji
 class MeteredAudioCodec : public BoxAudioCodec {
@@ -207,11 +204,7 @@ public:
     // The base only shows an icon when muted; this one always shows the level
     virtual void UpdateStatusBar(bool update_all = false) override {
         SpiLcdDisplay::UpdateStatusBar(update_all);
-        int level;
-        bool charging, discharging;
-        bool has_battery = Board::GetInstance().GetBatteryLevel(level, charging, discharging);
         DisplayLockGuard lock(this);
-        battery_level_ = has_battery ? level : -1;
         RefreshVolumeIcon(Board::GetInstance().GetAudioCodec()->output_volume());
     }
 
@@ -287,7 +280,6 @@ private:
     std::function<void()> on_emoji_tap_;
     std::function<void(int)> on_volume_change_;
     std::function<int(bool)> audio_level_;
-    int battery_level_ = -1;
     lv_point_t emoji_press_point_ = {0, 0};
     lv_obj_t* volume_arc_ = nullptr;
     lv_obj_t* volume_label_ = nullptr;
@@ -570,7 +562,6 @@ private:
         hide_timer_ = lv_timer_create(OnHideTimer, 1000, this);
 
         SetupVoiceBars();
-        SetupWatchFace();
     }
 
     // Places the pill, the status line and the chat lines from measured sizes.
@@ -842,7 +833,6 @@ private:
         }
         text_visible_ = true;
         lv_obj_remove_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
-        UpdateWatchFace();
     }
 
     void HideText() {
@@ -851,7 +841,6 @@ private:
         }
         text_visible_ = false;
         lv_obj_add_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
-        UpdateWatchFace();
         // Next time it shows, start from the newest page
         if (!following_ && !pages_.empty()) {
             following_ = true;
@@ -930,7 +919,6 @@ private:
     // Hides the text once the device is idle and nobody has touched it for a while
     static void OnHideTimer(lv_timer_t* timer) {
         auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
-        self->UpdateWatchFace();
         if (!self->text_visible_ ||
             Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
             self->last_content_tick_ = lv_tick_get();
@@ -1043,104 +1031,6 @@ private:
                 lv_obj_set_height(self->bars_[side * kBarCount + i], h);
             }
         }
-    }
-
-    // ---- Watch face: while idle with no text, the time sits left of the emoji,
-    // the date right of it at the same size with the weekday under it, and battery
-    // and volume below
-
-    static constexpr int kFaceSideOffset = 138;  // centre of each side column
-
-    lv_obj_t* face_time_ = nullptr;
-    lv_obj_t* face_date_ = nullptr;
-    lv_obj_t* face_weekday_ = nullptr;
-    lv_obj_t* face_info_ = nullptr;
-    bool face_visible_ = false;
-
-    lv_obj_t* CreateFaceLabel() {
-        lv_obj_t* label = lv_label_create(lv_screen_active());
-        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(label, "");
-        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
-        return label;
-    }
-
-    void SetupWatchFace() {
-        // Time and date share the built-in font: digits at a large size, never
-        // freed by a theme pack. The line below uses the theme's font for CJK.
-        face_time_ = CreateFaceLabel();
-        lv_obj_set_style_text_font(face_time_, &BUILTIN_TEXT_FONT, 0);
-        face_date_ = CreateFaceLabel();
-        lv_obj_set_style_text_font(face_date_, &BUILTIN_TEXT_FONT, 0);
-        face_weekday_ = CreateFaceLabel();
-        lv_obj_set_style_text_opa(face_weekday_, LV_OPA_80, 0);
-        face_info_ = CreateFaceLabel();
-        lv_obj_set_style_text_opa(face_info_, LV_OPA_60, 0);
-    }
-
-    void UpdateWatchFace() {
-        if (face_time_ == nullptr) {
-            return;
-        }
-        bool show = !text_visible_ &&
-                    Application::GetInstance().GetDeviceState() == kDeviceStateIdle;
-        if (show != face_visible_) {
-            face_visible_ = show;
-            for (lv_obj_t* label : {face_time_, face_date_, face_weekday_, face_info_}) {
-                if (show) {
-                    lv_obj_remove_flag(label, LV_OBJ_FLAG_HIDDEN);
-                } else {
-                    lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
-                }
-            }
-            // The big clock replaces the small one in the status line;
-            // notifications still show there
-            lv_obj_set_style_text_opa(status_label_, show ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
-        }
-        if (!show) {
-            return;
-        }
-        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-        for (lv_obj_t* label : {face_time_, face_date_, face_weekday_, face_info_}) {
-            lv_obj_set_style_text_color(label, lvgl_theme->text_color(), 0);
-        }
-
-        time_t now = time(nullptr);
-        struct tm* tm_now = localtime(&now);
-        bool clock_set = tm_now->tm_year >= 2025 - 1900;
-        static const char* const kWeekdays[] = {"日", "一", "二", "三", "四", "五", "六"};
-        char buf[64];
-        if (clock_set) {
-            strftime(buf, sizeof(buf), "%H:%M", tm_now);
-        } else {
-            strcpy(buf, "--:--");
-        }
-        lv_label_set_text(face_time_, buf);
-        if (clock_set) {
-            snprintf(buf, sizeof(buf), "%d/%d", tm_now->tm_mon + 1, tm_now->tm_mday);
-        } else {
-            strcpy(buf, "--/--");
-        }
-        lv_label_set_text(face_date_, buf);
-
-        lv_label_set_text(face_weekday_,
-                          clock_set ? (std::string("周") + kWeekdays[tm_now->tm_wday]).c_str() : "");
-
-        std::string info;
-        if (battery_level_ >= 0) {
-            snprintf(buf, sizeof(buf), "电量 %d%%", battery_level_);
-            info += (info.empty() ? "" : "  ·  ") + std::string(buf);
-        }
-        snprintf(buf, sizeof(buf), "音量 %d",
-                 Board::GetInstance().GetAudioCodec()->output_volume());
-        info += (info.empty() ? "" : "  ·  ") + std::string(buf);
-        lv_label_set_text(face_info_, info.c_str());
-
-        lv_obj_align(face_time_, LV_ALIGN_CENTER, -kFaceSideOffset, 0);
-        lv_obj_align(face_date_, LV_ALIGN_CENTER, kFaceSideOffset, 0);
-        lv_obj_update_layout(face_date_);
-        lv_obj_align_to(face_weekday_, face_date_, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
-        lv_obj_align(face_info_, LV_ALIGN_TOP_MID, 0, text_top_);
     }
 #endif
 };
