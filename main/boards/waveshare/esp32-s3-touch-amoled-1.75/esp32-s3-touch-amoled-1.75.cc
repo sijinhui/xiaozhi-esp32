@@ -155,10 +155,9 @@ public:
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
-    // Round 466x466 panel. With nothing to read, a large emoji sits at the centre.
-    // Once there is text, the emoji shrinks to the bottom arc and a scrollable chat
-    // history fills the middle. The history outlives the conversation and can be
-    // reopened by swiping up or down on the face.
+    // Round 466x466 panel: the emoji stays at the centre and the chat history fills
+    // the lower half, each line as wide as the circle allows at its height. The
+    // history outlives the conversation and is read a page at a time by swiping.
     virtual void SetChatMessage(const char* role, const char* content) override {
         DisplayLockGuard lock(this);
         AddChatMessage(role != nullptr ? role : "", content != nullptr ? content : "");
@@ -169,14 +168,17 @@ public:
         if (content == nullptr || entries_.empty() || entries_.back().text != content) {
             return;
         }
-        DeleteLastEntry();
+        entries_.pop_back();
+        OnContentChanged(true);
     }
 
     // Called when a conversation ends. The history stays; only the turn ends, so the
     // next answer starts a new paragraph.
     virtual void ClearChatMessages() override {
         DisplayLockGuard lock(this);
-        RemoveTransientSystemEntry();
+        if (RemoveTransientSystemEntry()) {
+            OnContentChanged(true);
+        }
         turn_open_ = false;
     }
 
@@ -184,15 +186,17 @@ public:
         DisplayLockGuard lock(this);
         hide_subtitle_ = hide;
         if (hide) {
-            ShowFace();
+            HideText();
         }
     }
 
     virtual void SetEmotion(const char* emotion) override {
         DisplayLockGuard lock(this);
         SpiLcdDisplay::SetEmotion(emotion);
-        // Emoji images are laid out unscaled; re-apply the current mode's transform
-        SetEmojiProgress(chat_visible_ ? 1000 : 0);
+        // A bigger emoji pushes the lines down; only then re-lay the pages
+        if (UpdateRoundLayout(false)) {
+            OnContentChanged(true);
+        }
     }
 
     virtual void SetTheme(Theme* theme) override {
@@ -201,9 +205,9 @@ public:
         if (bottom_bar_ != nullptr) {
             lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
         }
-        // A theme pack swaps the fonts, so every measured height changes
+        // A theme pack swaps the fonts, so every measured width and height changes
         UpdateRoundLayout(true);
-        ApplyChatColors();
+        OnContentChanged(true);
         ApplyVolumeColors();
     }
 #endif
@@ -401,35 +405,47 @@ private:
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
-    static constexpr int kEdgeMargin = 12;      // text stays this far inside the panel edge
-    static constexpr int kPillMargin = 20;      // extra room between the icon pill and the arc
-    static constexpr int kRowGap = 8;           // between the icon pill and the status line
-    static constexpr int kChatGap = 6;          // between the status line and the history
-    static constexpr int kEntryGap = 10;        // between two messages
-    static constexpr int kEmojiSlot = 128;      // size of the theme's emoji images
-    static constexpr int kSmallEmoji = 64;      // emoji size while the history shows
-    static constexpr int kSmallEmojiMargin = 14;  // small emoji to the bottom of the panel
-    static constexpr size_t kMaxEntries = 40;   // older messages are dropped
-    static constexpr uint32_t kTypeTickMs = 40; // typewriter step
-    static constexpr uint32_t kFaceAfterMs = 15000;  // idle and untouched this long: face
+    static constexpr int kEdgeMargin = 12;       // status text stays this far inside the edge
+    static constexpr int kTextMargin = 8;        // chat lines may run this close to the edge
+    static constexpr int kMinLineWidth = 110;    // narrower slots on the bottom arc are unused
+    static constexpr int kPillMargin = 20;       // extra room between the icon pill and the arc
+    static constexpr int kRowGap = 8;            // between the icon pill and the status line
+    static constexpr int kTextGap = 8;           // between the emoji and the first line
+    static constexpr int kEmojiSlot = 128;       // size of the theme's emoji images
+    static constexpr size_t kMaxEntries = 40;    // older messages are dropped
+    static constexpr uint32_t kTypeTickMs = 40;  // typewriter step
+    static constexpr uint32_t kHideAfterMs = 15000;  // idle and untouched this long: hide text
 
     struct ChatEntry {
-        lv_obj_t* label;
         char role;         // 'u'ser, 'a'ssistant or 's'ystem
-        std::string text;  // full text; the label may still be revealing it
-        size_t shown;      // bytes of text on the label
+        std::string text;  // full text
+        size_t shown;      // bytes of text revealed so far
+    };
+    struct TextPos {
+        size_t entry;
+        size_t offset;
+    };
+    struct Line {
+        size_t entry;
+        size_t from;
+        size_t to;
     };
 
     std::deque<ChatEntry> entries_;
-    lv_obj_t* chat_ = nullptr;
+    std::vector<TextPos> pages_;    // where each page starts; a page repeats the
+                                    // previous page's last line, re-wrapped
+    size_t page_ = 0;               // page on screen
+    bool following_ = true;         // stay on the newest page
+    bool text_visible_ = false;
+    bool turn_open_ = false;        // the next answer sentence joins the last paragraph
+    lv_obj_t* text_box_ = nullptr;
+    std::vector<lv_obj_t*> line_labels_;
+    std::vector<int> line_widths_;  // widest each line may be, top line first
+    int text_top_ = 0;
+    int line_height_ = 0;
     lv_timer_t* type_timer_ = nullptr;
-    lv_timer_t* face_timer_ = nullptr;
-    bool chat_visible_ = false;
-    bool follow_ = true;          // keep the newest line in view
-    bool chat_pressed_ = false;   // a finger is on the history
-    bool turn_open_ = false;      // the next answer sentence joins the last paragraph
+    lv_timer_t* hide_timer_ = nullptr;
     uint32_t last_content_tick_ = 0;
-    int small_emoji_offset_ = 0;  // centre of the small emoji, below the panel centre
 
     // Half-length of the chord at distance d from the centre, on the circle shrunk
     // by margin. Gives both the half width that fits at a given height and the
@@ -438,6 +454,10 @@ private:
         int r = width_ / 2 - margin;
         d = std::abs(d);
         return d >= r ? 0 : static_cast<int>(sqrtf(static_cast<float>(r * r - d * d)));
+    }
+
+    static const lv_font_t* TextFont() {
+        return lv_obj_get_style_text_font(lv_screen_active(), LV_PART_MAIN);
     }
 
     // One-time restyling of the objects created by LcdDisplay::SetupUI(). Fonts are
@@ -455,12 +475,8 @@ private:
         // Status and notification text share one line under the icons
         lv_label_set_long_mode(notification_label_, LV_LABEL_LONG_SCROLL_CIRCULAR);
 
-        // The chat history replaces the single-line subtitle
+        // The chat lines below replace the single-line subtitle
         lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
-
-        // The emoji scales around its own centre
-        lv_obj_set_style_transform_pivot_x(emoji_box_, lv_pct(50), 0);
-        lv_obj_set_style_transform_pivot_y(emoji_box_, lv_pct(50), 0);
 
         // Low battery popup: narrower and lifted so its corners stay on the panel
         int popup_w = width_ * 64 / 100;
@@ -471,54 +487,31 @@ private:
 
     void SetupChatView() {
         lv_obj_t* screen = lv_screen_active();
-        chat_ = lv_obj_create(screen);
-        lv_obj_set_style_bg_opa(chat_, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(chat_, 0, 0);
-        lv_obj_set_style_radius(chat_, 0, 0);
-        lv_obj_set_style_pad_all(chat_, 0, 0);
-        lv_obj_set_style_pad_row(chat_, kEntryGap, 0);
-        lv_obj_set_flex_flow(chat_, LV_FLEX_FLOW_COLUMN);
-        lv_obj_set_scrollbar_mode(chat_, LV_SCROLLBAR_MODE_OFF);
-        lv_obj_set_scroll_dir(chat_, LV_DIR_VER);
-        lv_obj_add_event_cb(chat_, OnChatEvent, LV_EVENT_ALL, this);
-        lv_obj_add_flag(chat_, LV_OBJ_FLAG_HIDDEN);
+        // Taps and swipes pass through to the screen underneath
+        text_box_ = lv_obj_create(screen);
+        lv_obj_set_style_bg_opa(text_box_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(text_box_, 0, 0);
+        lv_obj_set_style_radius(text_box_, 0, 0);
+        lv_obj_set_style_pad_all(text_box_, 0, 0);
+        lv_obj_remove_flag(text_box_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(text_box_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
 
-        // A swipe on the face brings the history back
+        // Swipe up for newer pages, down for older ones, either way to bring the
+        // text back once it has been hidden
         lv_obj_add_event_cb(screen, OnScreenGesture, LV_EVENT_GESTURE, this);
 
         type_timer_ = lv_timer_create(OnTypeTimer, kTypeTickMs, this);
         lv_timer_pause(type_timer_);
-        face_timer_ = lv_timer_create(OnFaceTimer, 1000, this);
-        ApplyChatColors();
+        hide_timer_ = lv_timer_create(OnHideTimer, 1000, this);
     }
 
-    void ApplyChatColors() {
-        if (current_theme_ == nullptr) {
-            return;
-        }
-        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-        for (auto& entry : entries_) {
-            StyleEntry(entry, lvgl_theme);
-        }
-    }
-
-    // The answer reads at full strength, the user's words and system lines dimmer
-    void StyleEntry(const ChatEntry& entry, LvglTheme* lvgl_theme) {
-        lv_obj_set_style_text_color(entry.label, lvgl_theme->text_color(), 0);
-        lv_obj_set_style_text_opa(entry.label, entry.role == 'a' ? LV_OPA_COVER : LV_OPA_60, 0);
-        lv_obj_set_style_text_align(entry.label,
-                                    entry.role == 'u'   ? LV_TEXT_ALIGN_RIGHT
-                                    : entry.role == 's' ? LV_TEXT_ALIGN_CENTER
-                                                        : LV_TEXT_ALIGN_LEFT,
-                                    0);
-    }
-
-    // Places the pill, the status line, the history and the small emoji from
-    // measured sizes.
-    void UpdateRoundLayout(bool log_layout) {
+    // Places the pill, the status line and the chat lines from measured sizes.
+    // Returns true when the line slots changed.
+    bool UpdateRoundLayout(bool log_layout) {
         if (top_bar_ == nullptr || status_bar_ == nullptr || emoji_box_ == nullptr ||
-            chat_ == nullptr) {
-            return;
+            text_box_ == nullptr) {
+            return false;
         }
         const int cy = height_ / 2;
         lv_obj_update_layout(top_bar_);
@@ -539,111 +532,283 @@ private:
         lv_obj_update_layout(status_bar_);
         int status_h = lv_obj_get_height(status_bar_);
 
-        // The small emoji sits on the bottom arc, the history between it and the
-        // status line, as wide as fits at its farther edge and clear of the volume band
-        int small_top = height_ - kSmallEmojiMargin - kSmallEmoji;
-        small_emoji_offset_ = small_top + kSmallEmoji / 2 - cy;
-        int chat_top = status_y + status_h + kChatGap;
-        int chat_bottom = small_top - kChatGap;
-        int far = std::max(cy - chat_top, chat_bottom - cy);
-        int chat_w = std::min(2 * CircleExtent(far, kEdgeMargin), width_ - 2 * kVolumeZoneWidth);
-        lv_obj_set_size(chat_, chat_w, chat_bottom - chat_top);
-        lv_obj_align(chat_, LV_ALIGN_TOP_MID, 0, chat_top);
-        SetEmojiProgress(chat_visible_ ? 1000 : 0);
+        // Chat lines start under the centred emoji and run down the lower arc. Each
+        // line may be as wide as the chord at its lower edge.
+        const lv_font_t* font = TextFont();
+        int line_h = std::max<int>(1, font->line_height);
+        lv_obj_update_layout(emoji_box_);
+        int emoji_h = lv_obj_get_height(emoji_box_);
+        int text_top = cy + std::max(emoji_h, kEmojiSlot) / 2 + kTextGap;
+        std::vector<int> widths;
+        for (int bottom = text_top + line_h; bottom - cy < width_ / 2; bottom += line_h) {
+            int w = 2 * CircleExtent(bottom - cy, kTextMargin);
+            if (w < kMinLineWidth) {
+                break;
+            }
+            widths.push_back(w);
+        }
+        if (widths.empty()) {
+            widths.push_back(std::max(2 * CircleExtent(text_top - cy, kTextMargin), 4 * line_h));
+        }
 
         if (log_layout) {
-            ESP_LOGI(TAG, "Round layout: pill y=%d-%d, status y=%d-%d w=%d, chat y=%d-%d w=%d, "
-                     "small emoji y=%d-%d",
+            ESP_LOGI(TAG,
+                     "Round layout: pill y=%d-%d, status y=%d-%d w=%d, emoji y=%d-%d, "
+                     "chat y=%d-%d, %d lines %d..%dpx",
                      pill_y, pill_y + pill_h, status_y, status_y + status_h, status_w,
-                     chat_top, chat_bottom, chat_w, small_top, small_top + kSmallEmoji);
+                     cy - emoji_h / 2, cy + emoji_h / 2, text_top,
+                     text_top + line_h * static_cast<int>(widths.size()),
+                     static_cast<int>(widths.size()), widths.front(), widths.back());
+        }
+        if (text_top == text_top_ && line_h == line_height_ && widths == line_widths_) {
+            return false;
+        }
+        text_top_ = text_top;
+        line_height_ = line_h;
+        line_widths_ = std::move(widths);
+
+        // One label per line slot. The labels get the margin as slack, so closing
+        // punctuation allowed past a line's width is not cut.
+        lv_obj_clean(text_box_);
+        line_labels_.clear();
+        int box_w = line_widths_.front() + 2 * kTextMargin;
+        lv_obj_set_size(text_box_, box_w, line_h * static_cast<int>(line_widths_.size()));
+        lv_obj_align(text_box_, LV_ALIGN_TOP_MID, 0, text_top);
+        for (size_t i = 0; i < line_widths_.size(); i++) {
+            lv_obj_t* label = lv_label_create(text_box_);
+            lv_obj_set_width(label, line_widths_[i] + 2 * kTextMargin);
+            lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+            lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+            lv_label_set_text(label, "");
+            lv_obj_align(label, LV_ALIGN_TOP_MID, 0, static_cast<int>(i) * line_h);
+            line_labels_.push_back(label);
+        }
+        return true;
+    }
+
+    // Decodes the UTF-8 code point at s[i] and advances i; a bad byte counts as one.
+    static uint32_t NextCodepoint(const std::string& s, size_t& i, size_t limit) {
+        unsigned char c = s[i];
+        size_t len = 1;
+        if ((c >> 5) == 0x6) {
+            len = 2;
+        } else if ((c >> 4) == 0xE) {
+            len = 3;
+        } else if ((c >> 3) == 0x1E) {
+            len = 4;
+        }
+        if (i + len > limit) {
+            len = 1;
+        }
+        uint32_t cp = len == 1 ? c : c & (0x7F >> len);
+        for (size_t k = 1; k < len; k++) {
+            cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3F);
+        }
+        i += len;
+        return cp;
+    }
+
+    // Closing punctuation stays at the end of the previous line instead of starting one
+    static bool NoLineStart(uint32_t cp) {
+        static const uint32_t kClosing[] = {
+            ',',    '.',    '!',    '?',    ';',    ':',    ')',    ']',
+            0x2026, 0x3001, 0x3002, 0x300B, 0x300D, 0x300F, 0x3011, 0xFF01,
+            0xFF09, 0xFF0C, 0xFF1A, 0xFF1B, 0xFF1F, 0xFF5E,
+        };
+        return std::find(std::begin(kClosing), std::end(kClosing), cp) != std::end(kClosing);
+    }
+
+    // Greedy break of text[start, limit) into one line at most max_w wide. CJK text
+    // breaks anywhere, Latin words at spaces. Sets where the line ends and where
+    // the next one starts.
+    static void BreakLine(const std::string& text, size_t start, size_t limit,
+                          const lv_font_t* font, int max_w, size_t& end, size_t& next) {
+        size_t i = start;
+        size_t space_break = std::string::npos;
+        int w = 0;
+        end = limit;
+        next = limit;
+        while (i < limit) {
+            size_t j = i;
+            uint32_t cp = NextCodepoint(text, j, limit);
+            if (cp == '\n') {
+                end = i;
+                next = j;
+                break;
+            }
+            size_t k = j;
+            uint32_t following = k < limit ? NextCodepoint(text, k, limit) : 0;
+            int glyph_w = lv_font_get_glyph_width(font, cp, following);
+            if (w + glyph_w > max_w && i > start && !NoLineStart(cp)) {
+                bool mid_word = cp < 0x80 && cp != ' ' && space_break != std::string::npos;
+                end = mid_word ? space_break : i;
+                next = end;
+                break;
+            }
+            w += glyph_w;
+            i = j;
+            if (cp == ' ') {
+                space_break = i;
+            }
+        }
+        while (end > start && text[end - 1] == ' ') {
+            end--;
+        }
+        while (next < limit && text[next] == ' ') {
+            next++;
         }
     }
 
-    // 0: large emoji at the centre, 1000: small emoji on the bottom arc
-    void SetEmojiProgress(int32_t v) {
-        if (emoji_box_ == nullptr) {
+    // Skips past entries with nothing (more) to show. Returns false at the end.
+    bool SkipFinished(TextPos& pos) const {
+        while (pos.entry < entries_.size() && pos.offset >= entries_[pos.entry].shown) {
+            pos.entry++;
+            pos.offset = 0;
+        }
+        return pos.entry < entries_.size();
+    }
+
+    // Fills the line slots from pos; each message starts on a new line. Returns
+    // true when everything shown so far fits.
+    bool LayoutPage(TextPos pos, std::vector<Line>& lines) const {
+        lines.clear();
+        const lv_font_t* font = TextFont();
+        for (int w : line_widths_) {
+            if (!SkipFinished(pos)) {
+                return true;
+            }
+            const auto& entry = entries_[pos.entry];
+            size_t end, next;
+            BreakLine(entry.text, pos.offset, entry.shown, font, w, end, next);
+            lines.push_back({pos.entry, pos.offset, end});
+            pos.offset = next;
+        }
+        return !SkipFinished(pos);
+    }
+
+    // Splits the history into pages. Text only ever grows at the end, so unless
+    // something was removed only the last page needs another look.
+    void Repaginate(bool full) {
+        if (full || pages_.empty()) {
+            pages_.assign(1, TextPos{0, 0});
+        }
+        std::vector<Line> lines;
+        while (!LayoutPage(pages_.back(), lines) && lines.size() > 1) {
+            // The next page repeats this page's last line so the reader keeps context
+            TextPos next{lines.back().entry, lines.back().from};
+            pages_.push_back(next);
+        }
+    }
+
+    void RenderPage() {
+        if (line_labels_.empty() || current_theme_ == nullptr) {
             return;
         }
-        lv_obj_update_layout(emoji_box_);
-        int size = std::max<int>(lv_obj_get_height(emoji_box_), kEmojiSlot);
-        int small_scale = 256 * kSmallEmoji / size;
-        lv_obj_set_style_transform_scale(emoji_box_, 256 - (256 - small_scale) * v / 1000, 0);
-        lv_obj_set_style_translate_y(emoji_box_, small_emoji_offset_ * v / 1000, 0);
+        std::vector<Line> lines;
+        if (!pages_.empty() && !entries_.empty()) {
+            LayoutPage(pages_[page_], lines);
+        }
+        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        for (size_t i = 0; i < line_labels_.size(); i++) {
+            lv_obj_t* label = line_labels_[i];
+            if (i >= lines.size()) {
+                lv_label_set_text(label, "");
+                continue;
+            }
+            const auto& entry = entries_[lines[i].entry];
+            std::string text = entry.text.substr(lines[i].from, lines[i].to - lines[i].from);
+            lv_label_set_text(label, text.c_str());
+            // The answer reads at full strength, the user's words and system lines dimmer
+            lv_obj_set_style_text_color(label, lvgl_theme->text_color(), 0);
+            lv_obj_set_style_text_opa(label, entry.role == 'a' ? LV_OPA_COVER : LV_OPA_60, 0);
+        }
     }
 
-    static void EmojiAnim(lv_anim_t* a, int32_t v) {
-        static_cast<CustomLcdDisplay*>(lv_anim_get_user_data(a))->SetEmojiProgress(v);
+    static void SetTranslateY(void* obj, int32_t v) {
+        lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(obj), v, 0);
     }
 
-    void AnimateEmoji(bool to_small) {
-        lv_anim_delete(emoji_box_, nullptr);
+    static void SetOpa(void* obj, int32_t v) {
+        lv_obj_set_style_opa(static_cast<lv_obj_t*>(obj), v, 0);
+    }
+
+    // A newer page rises from below, an older one drops in from above
+    void AnimatePageTurn(bool newer) {
+        lv_anim_delete(text_box_, nullptr);
+        int shift = (newer ? 1 : -1) * line_height_ * 2;
         lv_anim_t a;
         lv_anim_init(&a);
-        lv_anim_set_var(&a, emoji_box_);
-        lv_anim_set_user_data(&a, this);
-        lv_anim_set_custom_exec_cb(&a, EmojiAnim);
-        lv_anim_set_values(&a, to_small ? 0 : 1000, to_small ? 1000 : 0);
+        lv_anim_set_var(&a, text_box_);
         lv_anim_set_duration(&a, 250);
         lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+        lv_anim_set_exec_cb(&a, SetTranslateY);
+        lv_anim_set_values(&a, shift, 0);
+        lv_anim_start(&a);
+        lv_anim_set_exec_cb(&a, SetOpa);
+        lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
         lv_anim_start(&a);
     }
 
-    void ShowChat() {
-        if (hide_subtitle_ || chat_ == nullptr || entries_.empty()) {
-            return;
+    void OnContentChanged(bool full) {
+        Repaginate(full);
+        size_t last = pages_.size() - 1;
+        if (following_ || page_ > last) {
+            bool turned = page_ < last && text_visible_;
+            page_ = last;
+            following_ = true;
+            if (turned) {
+                AnimatePageTurn(true);
+            }
         }
+        RenderPage();
+        if (entries_.empty()) {
+            HideText();
+        } else {
+            ShowText();
+        }
+    }
+
+    void ShowText() {
         last_content_tick_ = lv_tick_get();
-        if (chat_visible_) {
+        if (hide_subtitle_ || text_box_ == nullptr || entries_.empty() || text_visible_) {
             return;
         }
-        chat_visible_ = true;
-        lv_obj_remove_flag(chat_, LV_OBJ_FLAG_HIDDEN);
-        follow_ = true;
-        ScrollToEnd();
-        AnimateEmoji(true);
+        text_visible_ = true;
+        lv_obj_remove_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
     }
 
-    void ShowFace() {
-        if (!chat_visible_) {
+    void HideText() {
+        if (!text_visible_) {
             return;
         }
-        chat_visible_ = false;
-        lv_obj_add_flag(chat_, LV_OBJ_FLAG_HIDDEN);
-        AnimateEmoji(false);
-    }
-
-    void ScrollToEnd() {
-        if (!follow_ || chat_pressed_ || !chat_visible_) {
-            return;
+        text_visible_ = false;
+        lv_obj_add_flag(text_box_, LV_OBJ_FLAG_HIDDEN);
+        // Next time it shows, start from the newest page
+        if (!following_ && !pages_.empty()) {
+            following_ = true;
+            page_ = pages_.size() - 1;
+            RenderPage();
         }
-        lv_obj_update_layout(chat_);
-        lv_obj_scroll_to_y(chat_, LV_COORD_MAX, LV_ANIM_OFF);
     }
 
     void AddChatMessage(const std::string& role, const std::string& content) {
-        if (chat_ == nullptr) {
+        if (text_box_ == nullptr) {
             return;
         }
+        bool full = RemoveTransientSystemEntry();
         if (role == "system") {
             // System lines (errors, activation codes, hints) are transient: each
             // replaces the last one and an empty one clears it
-            RemoveTransientSystemEntry();
             if (!content.empty()) {
-                AppendEntry('s', content, true);
+                entries_.push_back({'s', content, content.size()});
             }
         } else if (role == "user") {
-            RemoveTransientSystemEntry();
-            if (content.empty()) {
-                return;
+            if (!content.empty()) {
+                entries_.push_back({'u', content, content.size()});
+                turn_open_ = false;
+                following_ = true;  // a new question jumps back to the newest page
             }
-            AppendEntry('u', content, true);
-            turn_open_ = false;
-            follow_ = true;
-        } else {
-            if (content.empty()) {
-                return;  // the answer is never cleared, it stays in the history
-            }
-            RemoveTransientSystemEntry();
+        } else if (!content.empty()) {  // an empty answer is no reason to clear history
             if (turn_open_ && !entries_.empty() && entries_.back().role == 'a') {
                 auto& text = entries_.back().text;
                 // Keep a space between Latin sentences; CJK runs on
@@ -653,60 +818,36 @@ private:
                 }
                 text += content;
             } else {
-                AppendEntry('a', content, false);
+                entries_.push_back({'a', content, 0});
             }
             turn_open_ = true;
             lv_timer_resume(type_timer_);
         }
-        if (entries_.empty()) {
-            ShowFace();
-            return;
-        }
-        ShowChat();
-        ScrollToEnd();
-    }
-
-    void AppendEntry(char role, const std::string& text, bool show_all) {
-        lv_obj_t* label = lv_label_create(chat_);
-        lv_obj_set_width(label, lv_pct(100));
-        lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
-        lv_obj_remove_flag(label, LV_OBJ_FLAG_CLICKABLE);
-        lv_label_set_text(label, show_all ? text.c_str() : "");
-        entries_.push_back({label, role, text, show_all ? text.size() : 0});
-        StyleEntry(entries_.back(), static_cast<LvglTheme*>(current_theme_));
-        // Drop the oldest only while following, so a reader's page does not jump
-        while (entries_.size() > kMaxEntries && follow_) {
-            lv_obj_delete(entries_.front().label);
+        // Drop the oldest only while following, so a reader's page does not move
+        while (entries_.size() > kMaxEntries && following_) {
             entries_.pop_front();
+            full = true;
         }
+        OnContentChanged(full);
     }
 
-    void DeleteLastEntry() {
-        lv_obj_delete(entries_.back().label);
+    bool RemoveTransientSystemEntry() {
+        if (entries_.empty() || entries_.back().role != 's') {
+            return false;
+        }
         entries_.pop_back();
-        if (entries_.empty()) {
-            ShowFace();
-        }
-    }
-
-    void RemoveTransientSystemEntry() {
-        if (!entries_.empty() && entries_.back().role == 's') {
-            DeleteLastEntry();
-        }
+        return true;
     }
 
     // Reveals answer text a few characters at a time, faster when it falls behind
     static void OnTypeTimer(lv_timer_t* timer) {
         auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
-        if (self->entries_.empty() || self->entries_.back().role != 'a') {
+        if (self->entries_.empty() || self->entries_.back().role != 'a' ||
+            self->entries_.back().shown >= self->entries_.back().text.size()) {
             lv_timer_pause(timer);
             return;
         }
         auto& entry = self->entries_.back();
-        if (entry.shown >= entry.text.size()) {
-            lv_timer_pause(timer);
-            return;
-        }
         size_t backlog = entry.text.size() - entry.shown;
         size_t steps = 1 + backlog / 90;  // ~30 CJK characters behind: two per tick
         while (steps-- > 0 && entry.shown < entry.text.size()) {
@@ -714,54 +855,50 @@ private:
             size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
             entry.shown = std::min(entry.shown + len, entry.text.size());
         }
-        lv_label_set_text(entry.label, entry.text.substr(0, entry.shown).c_str());
-        self->last_content_tick_ = lv_tick_get();
-        self->ScrollToEnd();
+        self->OnContentChanged(false);
     }
 
-    // Back to the face once the device is idle and nobody has touched it for a while
-    static void OnFaceTimer(lv_timer_t* timer) {
+    // Hides the text once the device is idle and nobody has touched it for a while
+    static void OnHideTimer(lv_timer_t* timer) {
         auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
-        if (!self->chat_visible_ || self->chat_pressed_ ||
+        if (!self->text_visible_ ||
             Application::GetInstance().GetDeviceState() != kDeviceStateIdle) {
             self->last_content_tick_ = lv_tick_get();
             return;
         }
-        if (lv_tick_elaps(self->last_content_tick_) > kFaceAfterMs &&
-            lv_display_get_inactive_time(self->display_) > kFaceAfterMs) {
-            self->ShowFace();
-        }
-    }
-
-    static void OnChatEvent(lv_event_t* e) {
-        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
-        switch (lv_event_get_code(e)) {
-            case LV_EVENT_PRESSED:
-                self->chat_pressed_ = true;
-                break;
-            case LV_EVENT_RELEASED:
-            case LV_EVENT_PRESS_LOST:
-                self->chat_pressed_ = false;
-                self->follow_ = lv_obj_get_scroll_bottom(self->chat_) <= 8;
-                break;
-            case LV_EVENT_SCROLL_END:
-                // Scrolled back to the end: follow new text again
-                self->follow_ = lv_obj_get_scroll_bottom(self->chat_) <= 8;
-                break;
-            default:
-                break;
+        if (lv_tick_elaps(self->last_content_tick_) > kHideAfterMs &&
+            lv_display_get_inactive_time(self->display_) > kHideAfterMs) {
+            self->HideText();
         }
     }
 
     static void OnScreenGesture(lv_event_t* e) {
         auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
         lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_active());
-        if (!self->chat_visible_ && (dir == LV_DIR_TOP || dir == LV_DIR_BOTTOM)) {
-            self->ShowChat();
+        if ((dir != LV_DIR_TOP && dir != LV_DIR_BOTTOM) || self->pages_.empty()) {
+            return;
         }
+        if (!self->text_visible_) {
+            self->ShowText();
+            return;
+        }
+        size_t last = self->pages_.size() - 1;
+        if (dir == LV_DIR_TOP && self->page_ < last) {
+            self->page_++;
+            self->AnimatePageTurn(true);
+        } else if (dir == LV_DIR_BOTTOM && self->page_ > 0) {
+            self->page_--;
+            self->AnimatePageTurn(false);
+        } else {
+            return;
+        }
+        self->following_ = self->page_ == last;
+        self->RenderPage();
+        self->last_content_tick_ = lv_tick_get();
     }
 #endif
 };
+
 
 class CustomBacklight : public Backlight {
 public:
