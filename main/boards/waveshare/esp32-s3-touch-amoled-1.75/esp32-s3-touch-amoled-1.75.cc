@@ -411,7 +411,7 @@ private:
     static constexpr int kMinLineWidth = 130;    // narrower slots on the bottom arc are unused
     static constexpr int kPillMargin = 12;       // extra room between the icon pill and the arc
     static constexpr int kRowGap = 8;            // between the icon pill and the status line
-    static constexpr int kTextGap = 8;           // between the emoji and the first line
+    static constexpr int kTextGap = 14;          // between the emoji and the first line
     static constexpr int kEmojiSlot = 128;       // size of the theme's emoji images
     static constexpr size_t kMaxEntries = 40;    // older messages are dropped
     static constexpr uint32_t kTypeTickMs = 40;  // typewriter step
