@@ -105,11 +105,13 @@ jobs:
     container:
       image: espressif/idf:release-v6.1
     env:
-      # 镜像已开 IDF_CCACHE_ENABLE=1。ccache 和组件下载缓存放在固定目录，
+      # 镜像已开 IDF_CCACHE_ENABLE=1，这里把 ccache 目录固定下来，
       # 由 actions/cache 在任务之间保存和恢复（容器里 HOME 是 /github/home）。
       CCACHE_DIR: /github/home/.ccache
       CCACHE_MAXSIZE: 1G
-      IDF_COMPONENT_CACHE_PATH: /github/home/.cache/idf-components
+      # IDF 6.1 每次编译都会重新生成 build/specs/picolibc.specs 并用 -specs= 传给 gcc；
+      # ccache 默认按修改时间校验 specs 文件，换一台机器就全部不命中，所以改成按内容校验。
+      CCACHE_COMPILERCHECK: content
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -118,7 +120,7 @@ jobs:
         id: keys
         shell: bash
         run: |
-          # 镜像里的 IDF 换了提交时，组件要重新解析，编译缓存也大多用不上
+          # 镜像里的 IDF 换了提交时，编译缓存大多用不上，分开存
           IDF_REV=$(git -c safe.directory='*' -C "$IDF_PATH" rev-parse --short HEAD 2>/dev/null || echo unknown)
           echo "idf=$IDF_REV" >> "$GITHUB_OUTPUT"
 
@@ -131,15 +133,6 @@ jobs:
           restore-keys: |
             ccache-${{ matrix.full_name }}-${{ steps.keys.outputs.idf }}-
             ccache-${{ matrix.full_name }}-
-
-      # 有 dependencies.lock 就不用每次花 40 秒解析 74 个组件，下载也从本地缓存拷
-      - name: Restore IDF components
-        uses: actions/cache@v6
-        with:
-          path: |
-            dependencies.lock
-            /github/home/.cache/idf-components
-          key: idf-components-${{ matrix.full_name }}-${{ steps.keys.outputs.idf }}-${{ hashFiles('main/idf_component.yml') }}
 
       - name: Build current variant
         shell: bash
