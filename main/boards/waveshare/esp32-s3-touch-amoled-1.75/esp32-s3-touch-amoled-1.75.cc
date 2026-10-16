@@ -22,10 +22,13 @@
 #include <esp_lcd_touch_cst9217.h>
 #include <esp_lvgl_port.h>
 #include <lvgl.h>
+#include <material_symbols.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -131,6 +134,21 @@ public:
         ApplyRoundStyles();
         UpdateRoundLayout(true);
 #endif
+        SetupTouchControls();
+    }
+
+    // Touch actions go to the board, which owns the chat state and the codec.
+    // Both run on the LVGL task.
+    void OnEmojiTap(std::function<void()> callback) { on_emoji_tap_ = std::move(callback); }
+    void OnVolumeChange(std::function<void(int)> callback) {
+        on_volume_change_ = std::move(callback);
+    }
+
+    // The base only shows an icon when muted; this one always shows the level
+    virtual void UpdateStatusBar(bool update_all = false) override {
+        SpiLcdDisplay::UpdateStatusBar(update_all);
+        DisplayLockGuard lock(this);
+        RefreshVolumeIcon(Board::GetInstance().GetAudioCodec()->output_volume());
     }
 
 #if !CONFIG_USE_WECHAT_MESSAGE_STYLE
@@ -186,9 +204,188 @@ public:
         // A theme pack swaps the fonts, so every measured height changes
         UpdateRoundLayout(true);
         RefreshSubtitle();
+        ApplyVolumeColors();
     }
+#endif
 
 private:
+    static constexpr int kEmojiTapMargin = 24;    // taps this close to the emoji still count
+    static constexpr int kVolumeArcSpan = 40;     // degrees above and below 3 o'clock
+    static constexpr int kVolumeArcInset = 6;     // gap between the arc and the panel edge
+    static constexpr int kVolumeArcWidth = 10;
+    static constexpr int kVolumeZoneWidth = 96;   // touch band along the right edge
+    static constexpr int kVolumeDragStart = 8;    // movement before a touch becomes a drag
+    static constexpr int kVolumeStep = 5;         // fewer settings writes while dragging
+    static constexpr uint32_t kVolumeHideMs = 1500;
+
+    std::function<void()> on_emoji_tap_;
+    std::function<void(int)> on_volume_change_;
+    lv_obj_t* volume_arc_ = nullptr;
+    lv_obj_t* volume_label_ = nullptr;
+    lv_obj_t* volume_zone_ = nullptr;
+    lv_timer_t* volume_hide_timer_ = nullptr;
+    lv_point_t volume_press_point_ = {0, 0};
+    bool volume_dragging_ = false;
+    int volume_ = 0;
+
+    // Tap the emoji to start or end a chat. Drag along the right edge to set the
+    // volume; a tap there only shows the current level.
+    void SetupTouchControls() {
+        DisplayLockGuard lock(this);
+        lv_obj_t* screen = lv_screen_active();
+        lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+
+        // Panels drawn over the emoji's tap margin would swallow the tap
+        for (lv_obj_t* obj : {top_bar_, status_bar_, bottom_bar_, low_battery_popup_}) {
+            if (obj != nullptr) {
+                lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+            }
+        }
+        if (emoji_box_ != nullptr) {
+            lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_set_ext_click_area(emoji_box_, kEmojiTapMargin);
+            lv_obj_add_event_cb(emoji_box_, OnEmojiClicked, LV_EVENT_CLICKED, this);
+        }
+
+        // Display-only arc hugging the right edge; the zone below takes the touches
+        volume_arc_ = lv_arc_create(screen);
+        int diameter = width_ - 2 * kVolumeArcInset;
+        lv_obj_set_size(volume_arc_, diameter, diameter);
+        lv_obj_center(volume_arc_);
+        lv_obj_remove_flag(volume_arc_, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(volume_arc_, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(volume_arc_, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(volume_arc_, 0, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(volume_arc_, kVolumeArcWidth, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(volume_arc_, kVolumeArcWidth, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(volume_arc_, LV_OPA_TRANSP, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(volume_arc_, 0, LV_PART_KNOB);
+        lv_arc_set_bg_angles(volume_arc_, 360 - kVolumeArcSpan, kVolumeArcSpan);
+        lv_obj_add_flag(volume_arc_, LV_OBJ_FLAG_HIDDEN);
+
+        volume_label_ = lv_label_create(screen);
+        lv_obj_set_style_radius(volume_label_, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(volume_label_, LV_OPA_70, 0);
+        lv_obj_set_style_pad_hor(volume_label_, 10, 0);
+        lv_obj_set_style_pad_ver(volume_label_, 4, 0);
+        lv_obj_align(volume_label_, LV_ALIGN_RIGHT_MID,
+                     -(kVolumeArcInset + kVolumeArcWidth + 14), 0);
+        lv_obj_add_flag(volume_label_, LV_OBJ_FLAG_HIDDEN);
+
+        int reach = static_cast<int>((width_ / 2) * sinf(kVolumeArcSpan * static_cast<float>(M_PI) / 180));
+        volume_zone_ = lv_obj_create(screen);
+        lv_obj_set_size(volume_zone_, kVolumeZoneWidth, 2 * reach);
+        lv_obj_align(volume_zone_, LV_ALIGN_RIGHT_MID, 0, 0);
+        lv_obj_set_style_bg_opa(volume_zone_, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(volume_zone_, 0, 0);
+        lv_obj_set_style_radius(volume_zone_, 0, 0);
+        lv_obj_set_style_pad_all(volume_zone_, 0, 0);
+        lv_obj_remove_flag(volume_zone_, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(volume_zone_, LV_OBJ_FLAG_SCROLL_CHAIN);
+        lv_obj_remove_flag(volume_zone_, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_add_event_cb(volume_zone_, OnVolumeTouch, LV_EVENT_ALL, this);
+
+        volume_hide_timer_ = lv_timer_create(OnVolumeHideTimer, kVolumeHideMs, this);
+        lv_timer_pause(volume_hide_timer_);
+
+        ApplyVolumeColors();
+    }
+
+    // Colours follow the theme so the arc reads on both light and dark backgrounds
+    void ApplyVolumeColors() {
+        if (volume_arc_ == nullptr || current_theme_ == nullptr) {
+            return;
+        }
+        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        lv_obj_set_style_arc_color(volume_arc_, lvgl_theme->text_color(), LV_PART_MAIN);
+        lv_obj_set_style_arc_opa(volume_arc_, LV_OPA_30, LV_PART_MAIN);
+        lv_obj_set_style_arc_color(volume_arc_, lvgl_theme->text_color(), LV_PART_INDICATOR);
+        lv_obj_set_style_arc_opa(volume_arc_, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(volume_label_, lvgl_theme->background_color(), 0);
+        lv_obj_set_style_text_color(volume_label_, lvgl_theme->text_color(), 0);
+    }
+
+    void RefreshVolumeIcon(int volume) {
+        if (mute_label_ == nullptr) {
+            return;
+        }
+        const char* icon = volume <= 0  ? MATERIAL_SYMBOLS_VOLUME_OFF
+                           : volume < 34 ? MATERIAL_SYMBOLS_VOLUME_MUTE
+                           : volume < 67 ? MATERIAL_SYMBOLS_VOLUME_DOWN
+                                         : MATERIAL_SYMBOLS_VOLUME_UP;
+        if (strcmp(lv_label_get_text(mute_label_), icon) != 0) {
+            lv_label_set_text(mute_label_, icon);
+        }
+    }
+
+    // The indicator grows from the bottom end of the arc towards the top
+    void ShowVolume(int volume) {
+        int start = kVolumeArcSpan - 2 * kVolumeArcSpan * volume / 100;
+        lv_arc_set_angles(volume_arc_, (start + 360) % 360, kVolumeArcSpan);
+        lv_label_set_text_fmt(volume_label_, "%d", volume);
+        RefreshVolumeIcon(volume);
+    }
+
+    // Maps a point to the volume at the same angle on the arc: top end 100, bottom 0
+    int VolumeAtPoint(const lv_point_t& p) const {
+        float deg = atan2f(static_cast<float>(p.y - height_ / 2),
+                           static_cast<float>(p.x - width_ / 2)) * 180 / static_cast<float>(M_PI);
+        deg = std::clamp(deg, -static_cast<float>(kVolumeArcSpan),
+                         static_cast<float>(kVolumeArcSpan));
+        float level = (kVolumeArcSpan - deg) / (2 * kVolumeArcSpan) * 100 / kVolumeStep;
+        return static_cast<int>(lroundf(level)) * kVolumeStep;
+    }
+
+    static void OnEmojiClicked(lv_event_t* e) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+        if (self->on_emoji_tap_) {
+            self->on_emoji_tap_();
+        }
+    }
+
+    static void OnVolumeTouch(lv_event_t* e) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+        lv_event_code_t code = lv_event_get_code(e);
+        if (code == LV_EVENT_PRESSED) {
+            lv_indev_get_point(lv_indev_active(), &self->volume_press_point_);
+            self->volume_dragging_ = false;
+            self->volume_ = Board::GetInstance().GetAudioCodec()->output_volume();
+            self->ShowVolume(self->volume_);
+            lv_timer_pause(self->volume_hide_timer_);
+            lv_obj_remove_flag(self->volume_arc_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(self->volume_label_, LV_OBJ_FLAG_HIDDEN);
+        } else if (code == LV_EVENT_PRESSING) {
+            lv_point_t p;
+            lv_indev_get_point(lv_indev_active(), &p);
+            if (!self->volume_dragging_) {
+                if (std::abs(p.x - self->volume_press_point_.x) < kVolumeDragStart &&
+                    std::abs(p.y - self->volume_press_point_.y) < kVolumeDragStart) {
+                    return;
+                }
+                self->volume_dragging_ = true;
+            }
+            int volume = self->VolumeAtPoint(p);
+            if (volume != self->volume_) {
+                self->volume_ = volume;
+                self->ShowVolume(volume);
+                if (self->on_volume_change_) {
+                    self->on_volume_change_(volume);
+                }
+            }
+        } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+            lv_timer_reset(self->volume_hide_timer_);
+            lv_timer_resume(self->volume_hide_timer_);
+        }
+    }
+
+    static void OnVolumeHideTimer(lv_timer_t* timer) {
+        auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
+        lv_obj_add_flag(self->volume_arc_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(self->volume_label_, LV_OBJ_FLAG_HIDDEN);
+        lv_timer_pause(timer);
+    }
+
+#if !CONFIG_USE_WECHAT_MESSAGE_STYLE
     static constexpr int kEdgeMargin = 12;  // text stays this far inside the panel edge
     static constexpr int kPillMargin = 20;  // extra room between the icon pill and the arc
     static constexpr int kRowGap = 8;       // between the icon pill and the status line
@@ -509,15 +706,18 @@ private:
         ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
     }
 
+    // Shared by the BOOT button and a tap on the emoji
+    void HandleChatClick() {
+        auto& app = Application::GetInstance();
+        if (app.GetDeviceState() == kDeviceStateStarting) {
+            EnterWifiConfigMode();
+            return;
+        }
+        app.ToggleChatState();
+    }
+
     void InitializeButtons() {
-        boot_button_.OnClick([this]() {
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting) {
-                EnterWifiConfigMode();
-                return;
-            }
-            app.ToggleChatState();
-        });
+        boot_button_.OnClick([this]() { HandleChatClick(); });
 
 #if CONFIG_USE_DEVICE_AEC
         boot_button_.OnDoubleClick([this]() {
@@ -600,8 +800,25 @@ private:
             .disp = lv_display_get_default(),
             .handle = tp,
         };
-        lvgl_port_add_touch(&touch_cfg);
+        lv_indev_t* indev = lvgl_port_add_touch(&touch_cfg);
         ESP_LOGI(TAG, "Touch panel initialized successfully");
+
+        // The LVGL task delivers these; hand the work to the main task, which owns
+        // the chat state, the codec and the power save timer.
+        lvgl_port_lock(0);
+        lv_indev_add_event_cb(indev, [](lv_event_t* e) {
+            auto board = static_cast<WaveshareEsp32s3TouchAMOLED1inch75*>(lv_event_get_user_data(e));
+            Application::GetInstance().Schedule([board]() { board->power_save_timer_->WakeUp(); });
+        }, LV_EVENT_PRESSED, this);
+        lvgl_port_unlock();
+        display_->OnEmojiTap([this]() {
+            Application::GetInstance().Schedule([this]() { HandleChatClick(); });
+        });
+        display_->OnVolumeChange([this](int volume) {
+            Application::GetInstance().Schedule([this, volume]() {
+                GetAudioCodec()->SetOutputVolume(volume);
+            });
+        });
     }
 
     // 初始化工具
