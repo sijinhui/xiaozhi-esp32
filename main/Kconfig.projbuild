@@ -20,6 +20,15 @@ config GITHUB_OTA_REPO
     depends on GITHUB_OTA_ENABLE
     default "sijinhui/xiaozhi-esp32"
 
+config GITHUB_OTA_MIRROR
+    string "Download proxy prefix (empty = github.com only)"
+    depends on GITHUB_OTA_ENABLE
+    default "https://proxy.xiaosi.cc/"
+    help
+        Put in front of the github.com URL and tried first; direct github.com
+        is tried if it fails. The image digest in the release json is checked
+        before switching partitions.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

@@ -512,11 +512,23 @@ bool Ota::CheckGithubRelease() {
         settings.SetString("installed", current);
     }
 
+    // Mirror first (direct github.com is often slow or blocked), then github.com itself.
+    // The firmware is later downloaded from the same source that answered.
     const std::string base = "https://github.com/" CONFIG_GITHUB_OTA_REPO "/releases/";
-    std::string error;
-    auto http = OpenGet(base + "latest/download/" BOARD_NAME ".json", error);
+    const std::string sources[] = {CONFIG_GITHUB_OTA_MIRROR, ""};
+    std::string source;
+    std::unique_ptr<Http> http;
+    for (const auto& prefix : sources) {
+        std::string error;
+        http = OpenGet(prefix + base + "latest/download/" BOARD_NAME ".json", error);
+        if (http) {
+            source = prefix;
+            break;
+        }
+        ESP_LOGW(TAG, "GitHub release check via %s failed: %s",
+                 prefix.empty() ? "github.com" : prefix.c_str(), error.c_str());
+    }
     if (!http) {
-        ESP_LOGW(TAG, "GitHub release check failed: %s", error.c_str());
         return false;
     }
     std::string body = http->ReadAll();
@@ -549,7 +561,7 @@ bool Ota::CheckGithubRelease() {
 
     ESP_LOGI(TAG, "New release %s available (current %s)", latest.c_str(), current.c_str());
     firmware_version_ = latest;
-    firmware_url_ = base + "download/" + latest + "/" BOARD_NAME ".bin";
+    firmware_url_ = source + base + "download/" + latest + "/" BOARD_NAME ".bin";
     firmware_sha256_ = digest;
     has_new_version_ = true;
     return true;
