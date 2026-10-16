@@ -409,7 +409,7 @@ private:
     static constexpr int kTextMargin = 24;       // chat lines keep this far inside the edge
     static constexpr int kPunctSlack = 8;        // closing punctuation may overrun a line by this
     static constexpr int kMinLineWidth = 130;    // narrower slots on the bottom arc are unused
-    static constexpr int kPillMargin = 20;       // extra room between the icon pill and the arc
+    static constexpr int kPillMargin = 12;       // extra room between the icon pill and the arc
     static constexpr int kRowGap = 8;            // between the icon pill and the status line
     static constexpr int kTextGap = 8;           // between the emoji and the first line
     static constexpr int kEmojiSlot = 128;       // size of the theme's emoji images
