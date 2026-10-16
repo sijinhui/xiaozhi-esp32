@@ -1165,6 +1165,15 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION AND NOT BOARD_NAME MATCHES "^[a-z0-9.-]+$")
         "Invalid BOARD_NAME '${BOARD_NAME}': only lowercase letters, digits, '.' and '-' are allowed"
     )
 endif()
+# Release tag compared by the GitHub OTA check (CONFIG_GITHUB_OTA_ENABLE). The release
+# workflow sets XIAOZHI_FW_TAG=vX.Y.Z; local builds are "dev".
+set(XIAOZHI_FW_TAG "$ENV{XIAOZHI_FW_TAG}")
+if(XIAOZHI_FW_TAG STREQUAL "")
+    set(XIAOZHI_FW_TAG "dev")
+endif()
+if(NOT CMAKE_BUILD_EARLY_EXPANSION AND NOT XIAOZHI_FW_TAG MATCHES "^[A-Za-z0-9._-]+$")
+    message(FATAL_ERROR "Invalid XIAOZHI_FW_TAG '${XIAOZHI_FW_TAG}'")
+endif()
 string(REGEX MATCH "^font_noto_sans_basic_([0-9]+)_([0-9]+)$" _font_match "${BUILTIN_TEXT_FONT}")
 if(NOT _font_match)
     message(FATAL_ERROR "Unsupported built-in text font name: ${BUILTIN_TEXT_FONT}")
@@ -1174,6 +1183,7 @@ set(TEXT_FONT_BPP "${CMAKE_MATCH_2}")
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     target_compile_definitions(${COMPONENT_LIB}
                         PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
+                        PRIVATE XIAOZHI_FW_TAG=\"${XIAOZHI_FW_TAG}\"
                         PRIVATE BOARD_MANUFACTURER=\"${BOARD_MANUFACTURER}\"
                         PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                         PRIVATE TEXT_FONT_SIZE=${TEXT_FONT_SIZE} TEXT_FONT_BPP=${TEXT_FONT_BPP}

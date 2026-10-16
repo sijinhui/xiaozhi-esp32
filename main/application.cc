@@ -456,6 +456,7 @@ void Application::CheckNewVersion() {
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10;  // Initial retry delay in seconds
+    bool github_release_checked = false;
 
     auto& board = Board::GetInstance();
     while (true) {
@@ -502,6 +503,12 @@ void Application::CheckNewVersion() {
         }
         retry_count = 0;
         retry_delay = 10;  // Reset retry delay
+
+        // Once per boot; a failed check just keeps the current firmware
+        if (!github_release_checked) {
+            github_release_checked = true;
+            ota_->CheckGithubRelease();
+        }
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
@@ -1317,13 +1324,16 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     audio_service_.Stop();
     vTaskDelay(pdMS_TO_TICKS(1000));
 
+    // Releases found by CheckGithubRelease carry a digest to verify before switching partitions
+    std::string expected_sha256 =
+        (ota_ && upgrade_url == ota_->GetFirmwareUrl()) ? ota_->GetFirmwareSha256() : "";
     bool upgrade_success = Ota::Upgrade(upgrade_url, [this, display](int progress, size_t speed) {
         char buffer[32];
         snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
         Schedule([display, message = std::string(buffer)]() {
             display->SetChatMessage("system", message.c_str());
         });
-    });
+    }, expected_sha256);
 
     if (!upgrade_success) {
         // Upgrade failed, restart audio service and continue running

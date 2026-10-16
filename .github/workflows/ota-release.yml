@@ -1,0 +1,96 @@
+name: OTA Release
+
+# 在 GitHub 上发布 Release（tag 如 v1.0.0）时，编译开了 CONFIG_GITHUB_OTA_ENABLE 的板子，
+# 把 app 固件和版本信息上传到这个 Release。设备开机从 releases/latest 读 <板子名>.json，
+# 版本更新就下载 <板子名>.bin 升级（见 main/ota.cc 的 CheckGithubRelease）。
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 已存在的 Release tag（如 v1.0.0），重新编译并覆盖它的固件
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ota-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v6.1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: waveshare/esp32-s3-touch-amoled-1.75
+            name: esp32-s3-touch-amoled-1.75c-32m
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Build
+        shell: bash
+        env:
+          BOARD: ${{ matrix.board }}
+          VARIANT: ${{ matrix.name }}
+          XIAOZHI_FW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          [[ "$XIAOZHI_FW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([._-][A-Za-z0-9._-]*)?$ ]] || {
+            echo "tag 要是 vX.Y.Z 这种格式：$XIAOZHI_FW_TAG"; exit 1; }
+          source "$IDF_PATH/export.sh"
+          python scripts/build.py "$BOARD" --name "$VARIANT" --language zh-CN
+          grep -q '^CONFIG_GITHUB_OTA_ENABLE=y' build/sdkconfig || grep -q '^CONFIG_GITHUB_OTA_ENABLE=y' sdkconfig || {
+            echo "$VARIANT 没有打开 CONFIG_GITHUB_OTA_ENABLE"; exit 1; }
+          grep -qa "$XIAOZHI_FW_TAG" build/xiaozhi.bin || { echo "固件里找不到版本号 $XIAOZHI_FW_TAG"; exit 1; }
+
+      - name: Package
+        shell: bash
+        env:
+          VARIANT: ${{ matrix.name }}
+          XIAOZHI_FW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          mkdir -p dist
+          BIN=build/xiaozhi.bin
+          cp "$BIN" "dist/$VARIANT.bin"
+          # 设备校验的是镜像末尾附带的 SHA-256（esp_partition_get_sha256），先确认它和内容一致
+          APPENDED=$(tail -c 32 "$BIN" | od -An -tx1 | tr -d ' \n')
+          ACTUAL=$(head -c -32 "$BIN" | sha256sum | cut -d' ' -f1)
+          [ "$APPENDED" = "$ACTUAL" ] || { echo "镜像末尾的 SHA-256 不对：$APPENDED / $ACTUAL"; exit 1; }
+          printf '{"version":"%s","size":%d,"sha256":"%s"}\n' "$XIAOZHI_FW_TAG" \
+            "$(stat -c %s "$BIN")" "$APPENDED" > "dist/$VARIANT.json"
+          cat "dist/$VARIANT.json"
+          ls -l dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ota-${{ matrix.name }}
+          path: dist/
+          if-no-files-found: error
+
+  upload:
+    name: Upload to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: ota-*
+          path: dist
+          merge-multiple: true
+
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"

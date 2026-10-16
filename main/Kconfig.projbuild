@@ -6,6 +6,20 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config GITHUB_OTA_ENABLE
+    bool "Upgrade firmware from GitHub Releases"
+    default n
+    help
+        Keep using OTA_URL for activation and server config, but take firmware
+        updates from the latest GitHub Release instead of the OTA server.
+        The release must carry <BOARD_NAME>.json ({"version","size","sha256"})
+        and <BOARD_NAME>.bin. A failed check never blocks boot.
+
+config GITHUB_OTA_REPO
+    string "GitHub repository (owner/name)"
+    depends on GITHUB_OTA_ENABLE
+    default "sijinhui/xiaozhi-esp32"
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

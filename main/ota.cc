@@ -18,13 +18,97 @@
 #endif
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <charconv>
 #include <cstring>
 #include <expected>
+#include <strings.h>
 #include <system_error>
 #include <vector>
 
 #define TAG "Ota"
+
+namespace {
+
+#if CONFIG_GITHUB_OTA_ENABLE
+// Firmware comes from GitHub Releases (CheckGithubRelease); the OTA server's firmware
+// section is ignored so official images never replace this build.
+constexpr bool kUseServerFirmware = false;
+#else
+constexpr bool kUseServerFirmware = true;
+#endif
+
+// Http does not follow redirects; GitHub release downloads answer 302 to a file host.
+std::unique_ptr<Http> OpenGet(std::string url, std::string& error) {
+    auto network = Board::GetInstance().GetNetwork();
+    for (int hop = 0; hop < 5; ++hop) {
+        auto http = network->CreateHttp(0);
+        http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+        if (auto opened = http->Open("GET", url); !opened) {
+            error = opened.error().ToString();
+            return nullptr;
+        }
+        auto status_code = http->GetStatusCode();
+        if (!status_code) {
+            error = status_code.error().ToString();
+            return nullptr;
+        }
+        int code = *status_code;
+        if (code == 200) {
+            return http;
+        }
+        std::string location = http->GetResponseHeader("Location");
+        http->Close();
+        if ((code != 301 && code != 302 && code != 303 && code != 307 && code != 308) ||
+            location.empty()) {
+            error = "HTTP " + std::to_string(code);
+            return nullptr;
+        }
+        if (location[0] == '/') {
+            auto host_start = url.find("://");
+            auto path_start = host_start == std::string::npos ? std::string::npos
+                                                              : url.find('/', host_start + 3);
+            location = url.substr(0, path_start) + location;
+        }
+        url = location;
+    }
+    error = "too many redirects";
+    return nullptr;
+}
+
+#if CONFIG_GITHUB_OTA_ENABLE
+// Leading numbers of a release tag: v1.2.3 / v1.2.3-4-gabc -> {1,2,3}; "dev" -> {0,0,0}
+std::array<int, 3> ParseReleaseTag(const std::string& tag) {
+    std::array<int, 3> parts{};
+    size_t i = (!tag.empty() && (tag[0] == 'v' || tag[0] == 'V')) ? 1 : 0;
+    for (int& part : parts) {
+        if (i >= tag.size() || !isdigit(static_cast<unsigned char>(tag[i]))) {
+            break;
+        }
+        while (i < tag.size() && isdigit(static_cast<unsigned char>(tag[i]))) {
+            part = std::min(part * 10 + (tag[i++] - '0'), 999999);
+        }
+        if (i >= tag.size() || tag[i] != '.') {
+            break;
+        }
+        i++;
+    }
+    return parts;
+}
+
+// The tag is put into a download URL, so only allow ordinary tag characters
+bool IsValidReleaseTag(const std::string& tag) {
+    if (tag.empty() || tag.size() > 32) {
+        return false;
+    }
+    return std::all_of(tag.begin(), tag.end(), [](char c) {
+        return isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_';
+    });
+}
+#endif
+
+}  // namespace
 
 Ota::Ota() {
 #ifdef ESP_EFUSE_BLOCK_USR_DATA
@@ -224,6 +308,7 @@ NetworkResult<> Ota::CheckVersion() {
     }
 
     has_new_version_ = false;
+    firmware_sha256_.clear();
     cJSON *firmware = cJSON_GetObjectItem(root, "firmware");
     if (cJSON_IsObject(firmware)) {
         cJSON *version = cJSON_GetObjectItem(firmware, "version");
@@ -235,7 +320,7 @@ NetworkResult<> Ota::CheckVersion() {
             firmware_url_ = url->valuestring;
         }
 
-        if (cJSON_IsString(version) && cJSON_IsString(url)) {
+        if (kUseServerFirmware && cJSON_IsString(version) && cJSON_IsString(url)) {
             // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
             has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
             if (has_new_version_) {
@@ -277,7 +362,8 @@ void Ota::MarkCurrentVersionValid() {
     }
 }
 
-bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
+bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback,
+                  const std::string& expected_sha256) {
     ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
@@ -290,20 +376,10 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     bool image_header_checked = false;
     std::string image_header;
 
-    auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(0);
-    if (auto opened = http->Open("GET", firmware_url); !opened) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", opened.error().ToString().c_str());
-        return false;
-    }
-
-    auto status_code = http->GetStatusCode();
-    if (!status_code) {
-        ESP_LOGE(TAG, "Failed to read HTTP status: %s", status_code.error().ToString().c_str());
-        return false;
-    }
-    if (*status_code != 200) {
-        ESP_LOGE(TAG, "Failed to get firmware, status code: %d", *status_code);
+    std::string error;
+    auto http = OpenGet(firmware_url, error);
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to get firmware: %s", error.c_str());
         return false;
     }
 
@@ -395,6 +471,23 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
         return false;
     }
 
+    if (!expected_sha256.empty()) {
+        // For an app partition this is the digest appended to the image (last 32 bytes of the .bin)
+        uint8_t digest[32];
+        char hex[sizeof(digest) * 2 + 1];
+        if (esp_partition_get_sha256(update_partition, digest) != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read image digest");
+            return false;
+        }
+        for (size_t i = 0; i < sizeof(digest); i++) {
+            snprintf(hex + i * 2, 3, "%02x", digest[i]);
+        }
+        if (strcasecmp(hex, expected_sha256.c_str()) != 0) {
+            ESP_LOGE(TAG, "Image digest mismatch: %s, expected %s", hex, expected_sha256.c_str());
+            return false;
+        }
+    }
+
     err = esp_ota_set_boot_partition(update_partition);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set boot partition: %s", esp_err_to_name(err));
@@ -406,7 +499,63 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
 }
 
 bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback) {
-    return Upgrade(firmware_url_, callback);
+    return Upgrade(firmware_url_, callback, firmware_sha256_);
+}
+
+bool Ota::CheckGithubRelease() {
+#if CONFIG_GITHUB_OTA_ENABLE
+    const std::string current = XIAOZHI_FW_TAG;
+    Settings settings("github_ota", true);
+    // Remember the release this firmware came from. A local build ("dev") flashed afterwards
+    // is then not replaced by that same release again, only by a newer one.
+    if (current != "dev" && settings.GetString("installed") != current) {
+        settings.SetString("installed", current);
+    }
+
+    const std::string base = "https://github.com/" CONFIG_GITHUB_OTA_REPO "/releases/";
+    std::string error;
+    auto http = OpenGet(base + "latest/download/" BOARD_NAME ".json", error);
+    if (!http) {
+        ESP_LOGW(TAG, "GitHub release check failed: %s", error.c_str());
+        return false;
+    }
+    std::string body = http->ReadAll();
+    http->Close();
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "GitHub release: invalid " BOARD_NAME ".json");
+        return false;
+    }
+    cJSON* version = cJSON_GetObjectItem(root, "version");
+    cJSON* sha256 = cJSON_GetObjectItem(root, "sha256");
+    std::string latest = cJSON_IsString(version) ? version->valuestring : "";
+    std::string digest = cJSON_IsString(sha256) ? sha256->valuestring : "";
+    cJSON_Delete(root);
+    if (!IsValidReleaseTag(latest) || digest.size() != 64) {
+        ESP_LOGW(TAG, "GitHub release: incomplete " BOARD_NAME ".json");
+        return false;
+    }
+
+    if (latest == current || ParseReleaseTag(latest) <= ParseReleaseTag(current)) {
+        ESP_LOGI(TAG, "Firmware %s is up to date (latest release %s)", current.c_str(), latest.c_str());
+        return false;
+    }
+    if (settings.GetString("installed") == latest) {
+        ESP_LOGI(TAG, "Release %s was installed before; keeping local build %s", latest.c_str(),
+                 current.c_str());
+        return false;
+    }
+
+    ESP_LOGI(TAG, "New release %s available (current %s)", latest.c_str(), current.c_str());
+    firmware_version_ = latest;
+    firmware_url_ = base + "download/" + latest + "/" BOARD_NAME ".bin";
+    firmware_sha256_ = digest;
+    has_new_version_ = true;
+    return true;
+#else
+    return false;
+#endif
 }
 
 
