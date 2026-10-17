@@ -31,6 +31,8 @@ jobs:
         include:
           - board: waveshare/esp32-s3-touch-amoled-1.75
             name: esp32-s3-touch-amoled-1.75c-32m
+          - board: lckfb/szpi-esp32s3
+            name: lichuang-dev
     steps:
       - name: Checkout
         uses: actions/checkout@v7
