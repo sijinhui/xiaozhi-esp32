@@ -185,6 +185,14 @@ static const co5300_lcd_init_cmd_t vendor_specific_init[] = {
     {0x29, NULL, 0, 0},
 };
 
+// The brightness set by voice or on the left edge, which waking up returns to;
+// falls back the way Backlight::RestoreBrightness does
+static int SavedBrightness() {
+    Settings settings("display");
+    int brightness = settings.GetInt("brightness", 75);
+    return brightness > 0 ? std::min(brightness, 100) : 10;
+}
+
 // 在waveshare_amoled_1_75类之前添加新的显示类
 class CustomLcdDisplay : public SpiLcdDisplay {
 public:
@@ -240,7 +248,10 @@ public:
     // Both run on the LVGL task.
     void OnEmojiTap(std::function<void()> callback) { on_emoji_tap_ = std::move(callback); }
     void OnVolumeChange(std::function<void(int)> callback) {
-        on_volume_change_ = std::move(callback);
+        volume_slider_.apply = std::move(callback);
+    }
+    void OnBrightnessChange(std::function<void(int)> callback) {
+        brightness_slider_.apply = std::move(callback);
     }
 
     // Loudness 0..100 of the microphone (true) or the speaker (false)
@@ -309,38 +320,50 @@ public:
         // A theme pack swaps the fonts, so every measured width and height changes
         UpdateRoundLayout(true);
         OnContentChanged(true);
-        ApplyVolumeColors();
+        ApplySliderColors();
     }
 #endif
 
 private:
     static constexpr int kEmojiTapMargin = 24;    // taps this close to the emoji still count
     static constexpr int kTapSlop = 16;           // a press that moves further is a swipe
-    static constexpr int kVolumeArcSpan = 40;     // degrees above and below 3 o'clock
-    static constexpr int kVolumeArcInset = 6;     // gap between the arc and the panel edge
-    static constexpr int kVolumeArcWidth = 10;
-    static constexpr int kVolumeZoneWidth = 72;   // touch band along the right edge
-    static constexpr int kVolumeDragStart = 8;    // movement before a touch becomes a drag
-    static constexpr int kVolumeStep = 5;         // fewer settings writes while dragging
-    static constexpr uint32_t kVolumeApplyMs = 120;  // at most this often while dragging
-    static constexpr uint32_t kVolumeHideMs = 1500;
+    static constexpr int kSliderArcSpan = 40;     // degrees above and below the edge's midpoint
+    static constexpr int kSliderArcInset = 6;     // gap between the arc and the panel edge
+    static constexpr int kSliderArcWidth = 10;
+    static constexpr int kSliderZoneWidth = 72;   // touch band along the edge
+    static constexpr int kSliderDragStart = 8;    // movement before a touch becomes a drag
+    static constexpr int kSliderStep = 5;         // fewer settings writes while dragging
+    static constexpr uint32_t kSliderApplyMs = 120;  // at most this often while dragging
+    static constexpr uint32_t kSliderHideMs = 1500;
+    static constexpr int kMinBrightness = 5;      // the left edge never drags the panel dark
+
+    // A level 0..100 set by dragging along the left or right edge, shown on an arc
+    // hugging that edge. A tap there only shows the current level.
+    struct EdgeSlider {
+        CustomLcdDisplay* owner = nullptr;
+        bool left = false;
+        int min_level = 0;
+        std::function<int()> read;        // the level when a touch starts
+        std::function<void(int)> show;    // each level shown while dragging
+        std::function<void(int)> apply;   // to the board, thinned while dragging
+        lv_obj_t* arc = nullptr;
+        lv_obj_t* label = nullptr;
+        lv_timer_t* hide_timer = nullptr;
+        lv_point_t press_point = {0, 0};
+        bool dragging = false;
+        int level = 0;      // shown on the arc
+        int applied = 0;    // last handed to the board
+        uint32_t applied_tick = 0;
+    };
 
     std::function<void()> on_emoji_tap_;
-    std::function<void(int)> on_volume_change_;
     std::function<int(bool)> audio_level_;
     lv_point_t emoji_press_point_ = {0, 0};
-    lv_obj_t* volume_arc_ = nullptr;
-    lv_obj_t* volume_label_ = nullptr;
-    lv_obj_t* volume_zone_ = nullptr;
-    lv_timer_t* volume_hide_timer_ = nullptr;
-    lv_point_t volume_press_point_ = {0, 0};
-    bool volume_dragging_ = false;
-    int volume_ = 0;          // shown on the arc
-    int volume_applied_ = 0;  // last handed to the board
-    uint32_t volume_applied_tick_ = 0;
+    EdgeSlider volume_slider_;
+    EdgeSlider brightness_slider_;
 
     // Tap the emoji to start or end a chat. Drag along the right edge to set the
-    // volume; a tap there only shows the current level.
+    // volume and along the left edge to set the brightness.
     void SetupTouchControls() {
         DisplayLockGuard lock(this);
         lv_obj_t* screen = lv_screen_active();
@@ -359,62 +382,84 @@ private:
             lv_obj_add_event_cb(emoji_box_, OnEmojiEvent, LV_EVENT_CLICKED, this);
         }
 
-        // Display-only arc hugging the right edge; the zone below takes the touches
-        volume_arc_ = lv_arc_create(screen);
-        int diameter = width_ - 2 * kVolumeArcInset;
-        lv_obj_set_size(volume_arc_, diameter, diameter);
-        lv_obj_center(volume_arc_);
-        lv_obj_remove_flag(volume_arc_, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_bg_opa(volume_arc_, LV_OPA_TRANSP, LV_PART_MAIN);
-        lv_obj_set_style_border_width(volume_arc_, 0, LV_PART_MAIN);
-        lv_obj_set_style_pad_all(volume_arc_, 0, LV_PART_MAIN);
-        lv_obj_set_style_arc_width(volume_arc_, kVolumeArcWidth, LV_PART_MAIN);
-        lv_obj_set_style_arc_width(volume_arc_, kVolumeArcWidth, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(volume_arc_, LV_OPA_TRANSP, LV_PART_KNOB);
-        lv_obj_set_style_pad_all(volume_arc_, 0, LV_PART_KNOB);
-        lv_arc_set_bg_angles(volume_arc_, 360 - kVolumeArcSpan, kVolumeArcSpan);
-        lv_obj_add_flag(volume_arc_, LV_OBJ_FLAG_HIDDEN);
+        volume_slider_.read = []() { return Board::GetInstance().GetAudioCodec()->output_volume(); };
+        volume_slider_.show = [this](int volume) { RefreshVolumeIcon(volume); };
+        SetupSlider(volume_slider_, screen, false);
 
-        volume_label_ = lv_label_create(screen);
-        lv_obj_set_style_radius(volume_label_, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_bg_opa(volume_label_, LV_OPA_70, 0);
-        lv_obj_set_style_pad_hor(volume_label_, 10, 0);
-        lv_obj_set_style_pad_ver(volume_label_, 4, 0);
-        lv_obj_align(volume_label_, LV_ALIGN_RIGHT_MID,
-                     -(kVolumeArcInset + kVolumeArcWidth + 14), 0);
-        lv_obj_add_flag(volume_label_, LV_OBJ_FLAG_HIDDEN);
+        // Starts from the saved level, not the dimmed one the panel may show
+        brightness_slider_.min_level = kMinBrightness;
+        brightness_slider_.read = []() { return SavedBrightness(); };
+        SetupSlider(brightness_slider_, screen, true);
 
-        int reach = static_cast<int>((width_ / 2) * sinf(kVolumeArcSpan * static_cast<float>(M_PI) / 180));
-        volume_zone_ = lv_obj_create(screen);
-        lv_obj_set_size(volume_zone_, kVolumeZoneWidth, 2 * reach);
-        lv_obj_align(volume_zone_, LV_ALIGN_RIGHT_MID, 0, 0);
-        lv_obj_set_style_bg_opa(volume_zone_, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(volume_zone_, 0, 0);
-        lv_obj_set_style_radius(volume_zone_, 0, 0);
-        lv_obj_set_style_pad_all(volume_zone_, 0, 0);
-        lv_obj_remove_flag(volume_zone_, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_remove_flag(volume_zone_, LV_OBJ_FLAG_SCROLL_CHAIN);
-        lv_obj_remove_flag(volume_zone_, LV_OBJ_FLAG_GESTURE_BUBBLE);
-        lv_obj_add_event_cb(volume_zone_, OnVolumeTouch, LV_EVENT_ALL, this);
-
-        volume_hide_timer_ = lv_timer_create(OnVolumeHideTimer, kVolumeHideMs, this);
-        lv_timer_pause(volume_hide_timer_);
-
-        ApplyVolumeColors();
+        ApplySliderColors();
     }
 
-    // Colours follow the theme so the arc reads on both light and dark backgrounds
-    void ApplyVolumeColors() {
-        if (volume_arc_ == nullptr || current_theme_ == nullptr) {
+    void SetupSlider(EdgeSlider& slider, lv_obj_t* screen, bool left) {
+        slider.owner = this;
+        slider.left = left;
+        lv_align_t align = left ? LV_ALIGN_LEFT_MID : LV_ALIGN_RIGHT_MID;
+
+        // Display-only arc hugging the edge; the zone below takes the touches
+        slider.arc = lv_arc_create(screen);
+        int diameter = width_ - 2 * kSliderArcInset;
+        lv_obj_set_size(slider.arc, diameter, diameter);
+        lv_obj_center(slider.arc);
+        lv_obj_remove_flag(slider.arc, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_opa(slider.arc, LV_OPA_TRANSP, LV_PART_MAIN);
+        lv_obj_set_style_border_width(slider.arc, 0, LV_PART_MAIN);
+        lv_obj_set_style_pad_all(slider.arc, 0, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(slider.arc, kSliderArcWidth, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(slider.arc, kSliderArcWidth, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(slider.arc, LV_OPA_TRANSP, LV_PART_KNOB);
+        lv_obj_set_style_pad_all(slider.arc, 0, LV_PART_KNOB);
+        // Angles run clockwise from 3 o'clock
+        int mid = left ? 180 : 0;
+        lv_arc_set_bg_angles(slider.arc, (mid - kSliderArcSpan + 360) % 360, mid + kSliderArcSpan);
+        lv_obj_add_flag(slider.arc, LV_OBJ_FLAG_HIDDEN);
+
+        slider.label = lv_label_create(screen);
+        lv_obj_set_style_radius(slider.label, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_bg_opa(slider.label, LV_OPA_70, 0);
+        lv_obj_set_style_pad_hor(slider.label, 10, 0);
+        lv_obj_set_style_pad_ver(slider.label, 4, 0);
+        int label_inset = kSliderArcInset + kSliderArcWidth + 14;
+        lv_obj_align(slider.label, align, left ? label_inset : -label_inset, 0);
+        lv_obj_add_flag(slider.label, LV_OBJ_FLAG_HIDDEN);
+
+        int reach = static_cast<int>((width_ / 2) * sinf(kSliderArcSpan * static_cast<float>(M_PI) / 180));
+        lv_obj_t* zone = lv_obj_create(screen);
+        lv_obj_set_size(zone, kSliderZoneWidth, 2 * reach);
+        lv_obj_align(zone, align, 0, 0);
+        lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(zone, 0, 0);
+        lv_obj_set_style_radius(zone, 0, 0);
+        lv_obj_set_style_pad_all(zone, 0, 0);
+        lv_obj_remove_flag(zone, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(zone, LV_OBJ_FLAG_SCROLL_CHAIN);
+        lv_obj_remove_flag(zone, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_add_event_cb(zone, OnSliderTouch, LV_EVENT_ALL, &slider);
+
+        slider.hide_timer = lv_timer_create(OnSliderHideTimer, kSliderHideMs, &slider);
+        lv_timer_pause(slider.hide_timer);
+    }
+
+    // Colours follow the theme so the arcs read on both light and dark backgrounds
+    void ApplySliderColors() {
+        if (current_theme_ == nullptr) {
             return;
         }
         auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
-        lv_obj_set_style_arc_color(volume_arc_, lvgl_theme->text_color(), LV_PART_MAIN);
-        lv_obj_set_style_arc_opa(volume_arc_, LV_OPA_30, LV_PART_MAIN);
-        lv_obj_set_style_arc_color(volume_arc_, lvgl_theme->text_color(), LV_PART_INDICATOR);
-        lv_obj_set_style_arc_opa(volume_arc_, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_color(volume_label_, lvgl_theme->background_color(), 0);
-        lv_obj_set_style_text_color(volume_label_, lvgl_theme->text_color(), 0);
+        for (EdgeSlider* slider : {&volume_slider_, &brightness_slider_}) {
+            if (slider->arc == nullptr) {
+                continue;
+            }
+            lv_obj_set_style_arc_color(slider->arc, lvgl_theme->text_color(), LV_PART_MAIN);
+            lv_obj_set_style_arc_opa(slider->arc, LV_OPA_30, LV_PART_MAIN);
+            lv_obj_set_style_arc_color(slider->arc, lvgl_theme->text_color(), LV_PART_INDICATOR);
+            lv_obj_set_style_arc_opa(slider->arc, LV_OPA_COVER, LV_PART_INDICATOR);
+            lv_obj_set_style_bg_color(slider->label, lvgl_theme->background_color(), 0);
+            lv_obj_set_style_text_color(slider->label, lvgl_theme->text_color(), 0);
+        }
     }
 
     void RefreshVolumeIcon(int volume) {
@@ -431,21 +476,30 @@ private:
     }
 
     // The indicator grows from the bottom end of the arc towards the top
-    void ShowVolume(int volume) {
-        int start = kVolumeArcSpan - 2 * kVolumeArcSpan * volume / 100;
-        lv_arc_set_angles(volume_arc_, (start + 360) % 360, kVolumeArcSpan);
-        lv_label_set_text_fmt(volume_label_, "%d", volume);
-        RefreshVolumeIcon(volume);
+    static void ShowSlider(EdgeSlider& slider) {
+        int sweep = 2 * kSliderArcSpan * slider.level / 100;
+        if (slider.left) {
+            int bottom = 180 - kSliderArcSpan;
+            lv_arc_set_angles(slider.arc, bottom, bottom + sweep);
+        } else {
+            lv_arc_set_angles(slider.arc, (kSliderArcSpan - sweep + 360) % 360, kSliderArcSpan);
+        }
+        lv_label_set_text_fmt(slider.label, "%d", slider.level);
+        if (slider.show) {
+            slider.show(slider.level);
+        }
     }
 
-    // Maps a point to the volume at the same angle on the arc: top end 100, bottom 0
-    int VolumeAtPoint(const lv_point_t& p) const {
-        float deg = atan2f(static_cast<float>(p.y - height_ / 2),
-                           static_cast<float>(p.x - width_ / 2)) * 180 / static_cast<float>(M_PI);
-        deg = std::clamp(deg, -static_cast<float>(kVolumeArcSpan),
-                         static_cast<float>(kVolumeArcSpan));
-        float level = (kVolumeArcSpan - deg) / (2 * kVolumeArcSpan) * 100 / kVolumeStep;
-        return static_cast<int>(lroundf(level)) * kVolumeStep;
+    // Maps a point to the level at the same angle on the slider's arc: top end 100,
+    // bottom end 0, raised to the slider's minimum
+    int LevelAtPoint(const EdgeSlider& slider, const lv_point_t& p) const {
+        float dx = static_cast<float>(p.x - width_ / 2);
+        float deg = atan2f(static_cast<float>(p.y - height_ / 2), slider.left ? -dx : dx) *
+                    180 / static_cast<float>(M_PI);
+        deg = std::clamp(deg, -static_cast<float>(kSliderArcSpan),
+                         static_cast<float>(kSliderArcSpan));
+        float level = (kSliderArcSpan - deg) / (2 * kSliderArcSpan) * 100 / kSliderStep;
+        return std::max(static_cast<int>(lroundf(level)) * kSliderStep, slider.min_level);
     }
 
     // A swipe that starts on the emoji still ends in a click, since nothing under
@@ -467,59 +521,60 @@ private:
         }
     }
 
-    static void OnVolumeTouch(lv_event_t* e) {
-        auto self = static_cast<CustomLcdDisplay*>(lv_event_get_user_data(e));
+    static void OnSliderTouch(lv_event_t* e) {
+        auto& slider = *static_cast<EdgeSlider*>(lv_event_get_user_data(e));
         lv_event_code_t code = lv_event_get_code(e);
         if (code == LV_EVENT_PRESSED) {
-            lv_indev_get_point(lv_indev_active(), &self->volume_press_point_);
-            self->volume_dragging_ = false;
-            self->volume_ = Board::GetInstance().GetAudioCodec()->output_volume();
-            self->volume_applied_ = self->volume_;
-            self->ShowVolume(self->volume_);
-            lv_timer_pause(self->volume_hide_timer_);
-            lv_obj_remove_flag(self->volume_arc_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_remove_flag(self->volume_label_, LV_OBJ_FLAG_HIDDEN);
+            lv_indev_get_point(lv_indev_active(), &slider.press_point);
+            slider.dragging = false;
+            slider.level = slider.read();
+            slider.applied = slider.level;
+            ShowSlider(slider);
+            lv_timer_pause(slider.hide_timer);
+            lv_obj_remove_flag(slider.arc, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(slider.label, LV_OBJ_FLAG_HIDDEN);
         } else if (code == LV_EVENT_PRESSING) {
             lv_point_t p;
             lv_indev_get_point(lv_indev_active(), &p);
-            if (!self->volume_dragging_) {
-                if (std::abs(p.x - self->volume_press_point_.x) < kVolumeDragStart &&
-                    std::abs(p.y - self->volume_press_point_.y) < kVolumeDragStart) {
+            if (!slider.dragging) {
+                if (std::abs(p.x - slider.press_point.x) < kSliderDragStart &&
+                    std::abs(p.y - slider.press_point.y) < kSliderDragStart) {
                     return;
                 }
-                self->volume_dragging_ = true;
+                slider.dragging = true;
             }
-            int volume = self->VolumeAtPoint(p);
-            if (volume != self->volume_) {
-                self->volume_ = volume;
-                self->ShowVolume(volume);
+            int level = slider.owner->LevelAtPoint(slider, p);
+            if (level != slider.level) {
+                slider.level = level;
+                ShowSlider(slider);
             }
-            // Each applied step saves settings and clicks, so a fast swipe is thinned
-            if (lv_tick_elaps(self->volume_applied_tick_) >= kVolumeApplyMs) {
-                self->ApplyVolume();
+            // Each applied step saves settings (and clicks, for the volume), so a
+            // fast swipe is thinned
+            if (lv_tick_elaps(slider.applied_tick) >= kSliderApplyMs) {
+                ApplySlider(slider);
             }
         } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-            self->ApplyVolume();
-            lv_timer_reset(self->volume_hide_timer_);
-            lv_timer_resume(self->volume_hide_timer_);
+            ApplySlider(slider);
+            lv_timer_reset(slider.hide_timer);
+            lv_timer_resume(slider.hide_timer);
         }
     }
 
-    void ApplyVolume() {
-        if (volume_ == volume_applied_) {
+    static void ApplySlider(EdgeSlider& slider) {
+        if (slider.level == slider.applied) {
             return;
         }
-        volume_applied_ = volume_;
-        volume_applied_tick_ = lv_tick_get();
-        if (on_volume_change_) {
-            on_volume_change_(volume_);
+        slider.applied = slider.level;
+        slider.applied_tick = lv_tick_get();
+        if (slider.apply) {
+            slider.apply(slider.level);
         }
     }
 
-    static void OnVolumeHideTimer(lv_timer_t* timer) {
-        auto self = static_cast<CustomLcdDisplay*>(lv_timer_get_user_data(timer));
-        lv_obj_add_flag(self->volume_arc_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(self->volume_label_, LV_OBJ_FLAG_HIDDEN);
+    static void OnSliderHideTimer(lv_timer_t* timer) {
+        auto& slider = *static_cast<EdgeSlider*>(lv_timer_get_user_data(timer));
+        lv_obj_add_flag(slider.arc, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(slider.label, LV_OBJ_FLAG_HIDDEN);
         lv_timer_pause(timer);
     }
 
@@ -1133,7 +1188,9 @@ private:
         power_save_timer_ = new PowerSaveTimer(-1, 60, 300);
         power_save_timer_->OnEnterSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(true);
-            GetBacklight()->SetBrightness(20); });
+            // Half the chosen brightness within 5..20, and never brighter than it
+            int brightness = SavedBrightness();
+            GetBacklight()->SetBrightness(std::min(brightness, std::clamp(brightness / 2, 5, 20))); });
         power_save_timer_->OnExitSleepMode([this]() {
             GetDisplay()->SetPowerSaveMode(false);
             GetBacklight()->RestoreBrightness(); });
@@ -1303,6 +1360,12 @@ private:
                     app.PlaySound(std::string_view(
                         reinterpret_cast<const char*>(kVolumeTickOgg), sizeof(kVolumeTickOgg)));
                 }
+            });
+        });
+        // Saved like a brightness set by voice, so waking up returns to it
+        display_->OnBrightnessChange([this](int brightness) {
+            Application::GetInstance().Schedule([this, brightness]() {
+                GetBacklight()->SetBrightness(brightness, true);
             });
         });
     }
