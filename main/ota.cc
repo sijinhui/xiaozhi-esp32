@@ -77,7 +77,34 @@ std::unique_ptr<Http> OpenGet(std::string url, std::string& error) {
     return nullptr;
 }
 
+// For an app partition this is the digest appended to the image (last 32 bytes of the .bin),
+// as hex; empty when the partition holds no valid image.
+std::string PartitionDigest(const esp_partition_t* partition) {
+    uint8_t digest[32];
+    if (esp_partition_get_sha256(partition, digest) != ESP_OK) {
+        return "";
+    }
+    char hex[sizeof(digest) * 2 + 1];
+    for (size_t i = 0; i < sizeof(digest); i++) {
+        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    }
+    return hex;
+}
+
 #if CONFIG_GITHUB_OTA_ENABLE
+// True when the next upgrade would overwrite this very image after it failed to start: the
+// bootloader marks an update ABORTED when it reboots before MarkCurrentVersionValid() and
+// goes back to the previous firmware.
+bool WasRolledBack(const std::string& sha256) {
+    const esp_partition_t* partition = esp_ota_get_next_update_partition(nullptr);
+    esp_ota_img_states_t state;
+    if (partition == nullptr || esp_ota_get_state_partition(partition, &state) != ESP_OK ||
+        (state != ESP_OTA_IMG_ABORTED && state != ESP_OTA_IMG_INVALID)) {
+        return false;
+    }
+    return strcasecmp(PartitionDigest(partition).c_str(), sha256.c_str()) == 0;
+}
+
 // Leading numbers of a release tag: v1.2.3 / v1.2.3-4-gabc -> {1,2,3}; "dev" -> {0,0,0}
 std::array<int, 3> ParseReleaseTag(const std::string& tag) {
     std::array<int, 3> parts{};
@@ -477,18 +504,14 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     }
 
     if (!expected_sha256.empty()) {
-        // For an app partition this is the digest appended to the image (last 32 bytes of the .bin)
-        uint8_t digest[32];
-        char hex[sizeof(digest) * 2 + 1];
-        if (esp_partition_get_sha256(update_partition, digest) != ESP_OK) {
+        std::string hex = PartitionDigest(update_partition);
+        if (hex.empty()) {
             ESP_LOGE(TAG, "Failed to read image digest");
             return false;
         }
-        for (size_t i = 0; i < sizeof(digest); i++) {
-            snprintf(hex + i * 2, 3, "%02x", digest[i]);
-        }
-        if (strcasecmp(hex, expected_sha256.c_str()) != 0) {
-            ESP_LOGE(TAG, "Image digest mismatch: %s, expected %s", hex, expected_sha256.c_str());
+        if (strcasecmp(hex.c_str(), expected_sha256.c_str()) != 0) {
+            ESP_LOGE(TAG, "Image digest mismatch: %s, expected %s", hex.c_str(),
+                     expected_sha256.c_str());
             return false;
         }
     }
@@ -561,6 +584,12 @@ bool Ota::CheckGithubRelease() {
     if (settings.GetString("installed") == latest) {
         ESP_LOGI(TAG, "Release %s was installed before; keeping local build %s", latest.c_str(),
                  current.c_str());
+        return false;
+    }
+    // Installing it again would only crash and roll back again on every boot
+    if (WasRolledBack(digest)) {
+        ESP_LOGW(TAG, "Release %s failed to start and was rolled back; waiting for a newer release",
+                 latest.c_str());
         return false;
     }
 
