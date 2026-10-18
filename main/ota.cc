@@ -170,10 +170,15 @@ std::unique_ptr<Http> Ota::SetupHttp() {
  */
 NetworkResult<> Ota::CheckVersion() {
     auto& board = Board::GetInstance();
-    auto app_desc = esp_app_get_description();
 
     // Check if there is a new firmware version available
-    current_version_ = app_desc->version;
+#if CONFIG_GITHUB_OTA_ENABLE
+    // Shown on screen: the GitHub release tag ("dev" for local builds). PROJECT_VER stays
+    // the upstream version that is still reported to the OTA server.
+    current_version_ = XIAOZHI_FW_TAG;
+#else
+    current_version_ = esp_app_get_description()->version;
+#endif
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
     std::string url = GetCheckVersionUrl();
