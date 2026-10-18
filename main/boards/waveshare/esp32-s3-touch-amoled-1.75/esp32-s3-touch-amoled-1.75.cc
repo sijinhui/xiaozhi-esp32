@@ -1258,7 +1258,15 @@ private:
         if (err != ESP_OK) {
             static int failures = 0;
             if (++failures <= 5 || failures % 100 == 0) {
-                ESP_LOGW(TAG, "Touch read failed (%d): %s", failures, esp_err_to_name(err));
+                // Read the report register (0xD000) once more just to log what the controller
+                // answers; byte 6 should be the 0xAB ACK
+                uint8_t reg_low = 0x00;
+                uint8_t report[10] = {};
+                esp_lcd_panel_io_tx_param(tp->io, 0xD0, &reg_low, 1);
+                esp_lcd_panel_io_rx_param(tp->io, -1, report, sizeof(report));
+                ESP_LOGW(TAG, "Touch read failed (%d): %s, INT=%d", failures, esp_err_to_name(err),
+                         gpio_get_level(tp->config.int_gpio_num));
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, report, sizeof(report), ESP_LOG_WARN);
             }
             portENTER_CRITICAL(&tp->data.lock);
             tp->data.points = 0;
