@@ -1248,6 +1248,25 @@ private:
         backlight_->RestoreBrightness();
     }
 
+    // esp_lvgl_port aborts on any touch read error, but the CST9217 sometimes answers one
+    // frame without its ACK byte (ESP_ERR_INVALID_RESPONSE), e.g. ~2 s after the reboot that
+    // follows an OTA. Treat a failed read as "not touched" instead of restarting.
+    static inline esp_err_t (*cst9217_read_data_)(esp_lcd_touch_handle_t) = nullptr;
+
+    static esp_err_t ReadTouchData(esp_lcd_touch_handle_t tp) {
+        esp_err_t err = cst9217_read_data_(tp);
+        if (err != ESP_OK) {
+            static int failures = 0;
+            if (++failures <= 5 || failures % 100 == 0) {
+                ESP_LOGW(TAG, "Touch read failed (%d): %s", failures, esp_err_to_name(err));
+            }
+            portENTER_CRITICAL(&tp->data.lock);
+            tp->data.points = 0;
+            portEXIT_CRITICAL(&tp->data.lock);
+        }
+        return ESP_OK;
+    }
+
     void InitializeTouch() {
         esp_lcd_touch_handle_t tp;
         esp_lcd_touch_config_t tp_cfg = {
@@ -1271,6 +1290,8 @@ private:
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));
         ESP_LOGI(TAG, "Initialize touch controller");
         ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_cst9217(tp_io_handle, &tp_cfg, &tp));
+        cst9217_read_data_ = tp->read_data;
+        tp->read_data = ReadTouchData;
         const lvgl_port_touch_cfg_t touch_cfg = {
             .disp = lv_display_get_default(),
             .handle = tp,
