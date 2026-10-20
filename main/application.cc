@@ -71,7 +71,12 @@ void Application::Initialize() {
     auto display = board.GetDisplay();
     display->SetupUI();
     // Print board name/version info
+#if CONFIG_GITHUB_OTA_ENABLE
+    // Release tag ("dev" for local builds); the User-Agent sent to the OTA server keeps PROJECT_VER
+    display->SetChatMessage("system", BOARD_NAME "/" XIAOZHI_FW_TAG);
+#else
     display->SetChatMessage("system", SystemInfo::GetUserAgent().c_str());
+#endif
 
     // Setup the audio service
     auto codec = board.GetAudioCodec();
