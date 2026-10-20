@@ -216,10 +216,13 @@ class AssetsTest(unittest.TestCase):
                     HttpError error() const { std::abort(); }
                 };
                 struct Http {
+                    void SetHeader(const std::string&, const std::string&) { std::abort(); }
                     HttpResult Open(const char*, const std::string&) { std::abort(); }
                     HttpResult GetStatusCode() { std::abort(); }
+                    std::string GetResponseHeader(const std::string&) { std::abort(); }
                     size_t GetBodyLength() { std::abort(); }
                     HttpResult Read(void*, size_t) { std::abort(); }
+                    void Close() { std::abort(); }
                 };
                 struct Network { std::unique_ptr<Http> CreateHttp(int) { std::abort(); } };
                 class Board {

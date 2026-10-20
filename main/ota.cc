@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "http_get.h"
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
@@ -38,44 +39,6 @@ constexpr bool kUseServerFirmware = false;
 #else
 constexpr bool kUseServerFirmware = true;
 #endif
-
-// Http does not follow redirects; GitHub release downloads answer 302 to a file host.
-std::unique_ptr<Http> OpenGet(std::string url, std::string& error) {
-    auto network = Board::GetInstance().GetNetwork();
-    for (int hop = 0; hop < 5; ++hop) {
-        auto http = network->CreateHttp(0);
-        http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
-        if (auto opened = http->Open("GET", url); !opened) {
-            error = opened.error().ToString();
-            return nullptr;
-        }
-        auto status_code = http->GetStatusCode();
-        if (!status_code) {
-            error = status_code.error().ToString();
-            return nullptr;
-        }
-        int code = *status_code;
-        if (code == 200) {
-            return http;
-        }
-        std::string location = http->GetResponseHeader("Location");
-        http->Close();
-        if ((code != 301 && code != 302 && code != 303 && code != 307 && code != 308) ||
-            location.empty()) {
-            error = "HTTP " + std::to_string(code);
-            return nullptr;
-        }
-        if (location[0] == '/') {
-            auto host_start = url.find("://");
-            auto path_start = host_start == std::string::npos ? std::string::npos
-                                                              : url.find('/', host_start + 3);
-            location = url.substr(0, path_start) + location;
-        }
-        url = location;
-    }
-    error = "too many redirects";
-    return nullptr;
-}
 
 // For an app partition this is the digest appended to the image (last 32 bytes of the .bin),
 // as hex; empty when the partition holds no valid image.
@@ -409,7 +372,7 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     std::string image_header;
 
     std::string error;
-    auto http = OpenGet(firmware_url, error);
+    auto http = OpenHttpGet(firmware_url, error, SystemInfo::GetUserAgent());
     if (!http) {
         ESP_LOGE(TAG, "Failed to get firmware: %s", error.c_str());
         return false;
@@ -548,7 +511,8 @@ bool Ota::CheckGithubRelease() {
     std::unique_ptr<Http> http;
     for (const auto& prefix : sources) {
         std::string error;
-        http = OpenGet(prefix + base + "latest/download/" BOARD_NAME ".json", error);
+        http = OpenHttpGet(prefix + base + "latest/download/" BOARD_NAME ".json", error,
+                           SystemInfo::GetUserAgent());
         if (http) {
             source = prefix;
             break;
@@ -602,6 +566,80 @@ bool Ota::CheckGithubRelease() {
 #else
     return false;
 #endif
+}
+
+bool Ota::CheckGithubAssets() {
+#if CONFIG_GITHUB_OTA_ENABLE
+    const esp_partition_t* partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "assets");
+    if (partition == nullptr) {
+        return false;
+    }
+
+    // A fixed pre-release, so it never becomes the latest release that firmware is taken from
+    const std::string base = "https://github.com/" CONFIG_GITHUB_OTA_REPO
+                             "/releases/download/assets/" BOARD_NAME "-assets.";
+    const std::string sources[] = {CONFIG_GITHUB_OTA_MIRROR, ""};
+    std::string source;
+    std::unique_ptr<Http> http;
+    for (const auto& prefix : sources) {
+        std::string error;
+        http = OpenHttpGet(prefix + base + "json", error, SystemInfo::GetUserAgent());
+        if (http) {
+            source = prefix;
+            break;
+        }
+        ESP_LOGW(TAG, "GitHub assets check via %s failed: %s",
+                 prefix.empty() ? "github.com" : prefix.c_str(), error.c_str());
+        // GitHub has no pack for this board; asking github.com directly would only slow down boot
+        if (error == "HTTP 404") {
+            return false;
+        }
+    }
+    if (!http) {
+        return false;
+    }
+    std::string body = http->ReadAll();
+    http->Close();
+
+    cJSON* root = cJSON_Parse(body.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "GitHub assets: invalid " BOARD_NAME "-assets.json");
+        return false;
+    }
+    cJSON* sha256 = cJSON_GetObjectItem(root, "sha256");
+    cJSON* size = cJSON_GetObjectItem(root, "size");
+    std::string digest = cJSON_IsString(sha256) ? sha256->valuestring : "";
+    double length = cJSON_IsNumber(size) ? size->valuedouble : 0;
+    cJSON_Delete(root);
+    if (digest.size() != 64 || length <= 12 || length > partition->size) {
+        ESP_LOGW(TAG, "GitHub assets: incomplete " BOARD_NAME "-assets.json");
+        return false;
+    }
+
+    // The digest names the pack. Each new pack is installed once, so a pack pushed from the
+    // xiaozhi.me console or flashed by hand stays until another one is uploaded to the release.
+    Settings settings("github_ota", true);
+    if (strcasecmp(settings.GetString("assets").c_str(), digest.c_str()) == 0) {
+        ESP_LOGI(TAG, "Assets %.8s is up to date", digest.c_str());
+        return false;
+    }
+
+    ESP_LOGI(TAG, "New assets %.8s available", digest.c_str());
+    assets_url_ = source + base + "bin";
+    assets_sha256_ = digest;
+    return true;
+#else
+    return false;
+#endif
+}
+
+void Ota::MarkGithubAssetsInstalled() {
+    if (assets_sha256_.empty()) {
+        return;
+    }
+    Settings settings("github_ota", true);
+    settings.SetString("assets", assets_sha256_);
 }
 
 

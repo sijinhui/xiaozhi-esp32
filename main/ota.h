@@ -28,12 +28,17 @@ public:
                         const std::string& expected_sha256 = "");
     // Look for a newer firmware in the latest GitHub Release (CONFIG_GITHUB_OTA_ENABLE)
     bool CheckGithubRelease();
+    // Look for an assets pack in the "assets" GitHub Release that was not installed yet
+    bool CheckGithubAssets();
+    // Remember the pack found by CheckGithubAssets() once it is in the assets partition
+    void MarkGithubAssetsInstalled();
     void MarkCurrentVersionValid();
 
     const std::string& GetFirmwareVersion() const { return firmware_version_; }
     const std::string& GetCurrentVersion() const { return current_version_; }
     const std::string& GetFirmwareUrl() const { return firmware_url_; }
     const std::string& GetFirmwareSha256() const { return firmware_sha256_; }
+    const std::string& GetAssetsUrl() const { return assets_url_; }
     const std::string& GetActivationMessage() const { return activation_message_; }
     const std::string& GetActivationCode() const { return activation_code_; }
     std::string GetCheckVersionUrl();
@@ -52,6 +57,8 @@ private:
     std::string firmware_version_;
     std::string firmware_url_;
     std::string firmware_sha256_;
+    std::string assets_url_;
+    std::string assets_sha256_;
     std::string activation_challenge_;
     std::string serial_number_;
     int activation_timeout_ms_ = 30000;

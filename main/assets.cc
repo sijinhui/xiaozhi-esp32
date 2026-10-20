@@ -3,6 +3,7 @@
 #include "board.h"
 #include "cjson_utils.h"
 #include "display.h"
+#include "http_get.h"
 #include "lvgl_theme.h"
 #if HAVE_LVGL
 #include <spi_flash_mmap.h>
@@ -496,21 +497,10 @@ bool Assets::Download(std::string url,
                       std::function<void(int progress, size_t speed)> progress_callback) {
     ESP_LOGI(TAG, "Downloading new version of assets from %s", url.c_str());
 
-    auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(0);
-
-    if (auto opened = http->Open("GET", url); !opened) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", opened.error().ToString().c_str());
-        return false;
-    }
-
-    auto status_code = http->GetStatusCode();
-    if (!status_code) {
-        ESP_LOGE(TAG, "Failed to read HTTP status: %s", status_code.error().ToString().c_str());
-        return false;
-    }
-    if (*status_code != 200) {
-        ESP_LOGE(TAG, "Failed to get assets, status code: %d", *status_code);
+    std::string error;
+    auto http = OpenHttpGet(url, error);
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to get assets: %s", error.c_str());
         return false;
     }
 

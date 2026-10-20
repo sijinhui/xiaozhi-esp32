@@ -408,7 +408,8 @@ void Application::CheckAssetsVersion() {
     auto display = board.GetDisplay();
     auto& assets = Assets::GetInstance();
 
-    if (!assets.partition_valid()) {
+    // An invalid pack (e.g. an interrupted download) can still be replaced by a new one below
+    if (!assets.has_partition()) {
         ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
         return;
     }
@@ -416,10 +417,16 @@ void Application::CheckAssetsVersion() {
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
-
+    // A pack pushed from the xiaozhi.me console comes first, then the "assets" GitHub Release
+    bool from_github = false;
     if (!download_url.empty()) {
         settings.EraseKey("download_url");
+    } else if (ota_->CheckGithubAssets()) {
+        download_url = ota_->GetAssetsUrl();
+        from_github = true;
+    }
 
+    if (!download_url.empty()) {
         char message[256];
         snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
         Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_download", Lang::Sounds::OGG_UPGRADE);
@@ -447,8 +454,19 @@ void Application::CheckAssetsVersion() {
                   Lang::Sounds::OGG_EXCLAMATION);
             vTaskDelay(pdMS_TO_TICKS(2000));
             SetDeviceState(kDeviceStateActivating);
-            return;
+            // A release download usually fails before anything is erased (missing file, network);
+            // keep using the old pack then instead of running without one until the next boot.
+            if (!from_github) {
+                return;
+            }
+        } else if (from_github) {
+            ota_->MarkGithubAssetsInstalled();
         }
+    }
+
+    if (!assets.partition_valid()) {
+        ESP_LOGW(TAG, "Assets partition holds no valid assets");
+        return;
     }
 
     // Apply assets

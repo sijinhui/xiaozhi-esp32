@@ -14,6 +14,9 @@ config GITHUB_OTA_ENABLE
         updates from the latest GitHub Release instead of the OTA server.
         The release must carry <BOARD_NAME>.json ({"version","size","sha256"})
         and <BOARD_NAME>.bin. A failed check never blocks boot.
+        An assets pack is taken from the pre-release tagged "assets"
+        (<BOARD_NAME>-assets.json and .bin, see scripts/publish_assets.py) and
+        installed once per new pack.
 
 config GITHUB_OTA_REPO
     string "GitHub repository (owner/name)"
