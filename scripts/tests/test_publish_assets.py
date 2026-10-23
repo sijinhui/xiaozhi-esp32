@@ -2,11 +2,13 @@ import hashlib
 import importlib.util
 import json
 import struct
+import sys
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "scripts"))
 SPEC = importlib.util.spec_from_file_location("publish_assets", ROOT / "scripts/publish_assets.py")
 publish_assets = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(publish_assets)
@@ -39,6 +41,11 @@ class PublishAssetsTests(unittest.TestCase):
         data = pack({"index.json": json.dumps(self.INDEX).encode()})
         with self.assertRaisesRegex(ValueError, "长度"):
             publish_assets.describe_pack(bytes(data[:-1]))
+
+    def test_repo_pack_of_default_board_is_valid(self):
+        data = publish_assets.read_pack(publish_assets.BOARD_PACKS[publish_assets.DEFAULT_BOARD])
+        index = publish_assets.describe_pack(data)
+        self.assertTrue(index["multinet_model"]["commands"])
 
     def test_release_json_names_the_whole_file(self):
         data = bytes(pack({"index.json": b"{}"}))

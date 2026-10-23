@@ -16,5 +16,7 @@ main/mmap_generate_emoji.h
 .cache
 *.pyc
 *.bin
+# 1.75C 的资源包目录（scripts/pack_assets.py）里的字体和语音模型要入库
+!main/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/**/*.bin
 mmap_generate_*.h
 .clangd

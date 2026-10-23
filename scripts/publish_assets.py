@@ -3,8 +3,10 @@
 
 Boards built with CONFIG_GITHUB_OTA_ENABLE read <board>-assets.json from that release
 on boot and install <board>-assets.bin once for every new pack (main/ota.cc
-CheckGithubAssets). Needs a logged-in gh.
+CheckGithubAssets). A folder is packed first (scripts/pack_assets.py); without
+a pack the board's folder in the repo is used. Needs a logged-in gh.
 
+    python scripts/publish_assets.py
     python scripts/publish_assets.py assets.bin
     python scripts/publish_assets.py assets.bin --board lichuang-dev
 """
@@ -12,16 +14,21 @@ CheckGithubAssets). Needs a logged-in gh.
 import argparse
 import hashlib
 import json
-import shutil
 import struct
 import subprocess
 import tempfile
 from pathlib import Path
 
+from pack_assets import pack_folder
+
 
 TAG = "assets"
 DEFAULT_BOARD = "esp32-s3-touch-amoled-1.75c-32m"
 DEFAULT_REPOSITORY = "sijinhui/xiaozhi-esp32"
+ROOT = Path(__file__).resolve().parents[1]
+BOARD_PACKS = {
+    DEFAULT_BOARD: ROOT / "main/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/xiaosi",
+}
 HEADER_SIZE = 12
 TABLE_ENTRY_SIZE = 44
 
@@ -48,6 +55,10 @@ def describe_pack(data):
     raise ValueError("资源包里没有 index.json")
 
 
+def read_pack(path):
+    return pack_folder(path) if path.is_dir() else path.read_bytes()
+
+
 def release_json(data):
     return {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
 
@@ -59,13 +70,18 @@ def gh(*args, check=True):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("pack", type=Path, help="资源包 .bin")
+    parser.add_argument("pack", type=Path, nargs="?",
+                        help="资源包 .bin 或解开的目录，默认用仓库里这块板子的目录")
     parser.add_argument("--board", default=DEFAULT_BOARD, help="板子名（BOARD_NAME），默认 1.75C")
     parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
     parser.add_argument("--yes", action="store_true", help="不再询问，直接上传")
     args = parser.parse_args()
+    if args.pack is None:
+        if args.board not in BOARD_PACKS:
+            parser.error(f"仓库里没有 {args.board} 的资源包目录，请指定 .bin 或目录")
+        args.pack = BOARD_PACKS[args.board]
 
-    data = args.pack.read_bytes()
+    data = read_pack(args.pack)
     index = describe_pack(data)
     meta = release_json(data)
     print(f"资源包 {args.pack.name}: {meta['size']} 字节, sha256 {meta['sha256']}")
@@ -86,7 +102,7 @@ def main():
     with tempfile.TemporaryDirectory() as directory:
         pack = Path(directory) / f"{args.board}-assets.bin"
         info = Path(directory) / f"{args.board}-assets.json"
-        shutil.copyfile(args.pack, pack)
+        pack.write_bytes(data)
         info.write_text(json.dumps(meta) + "\n", encoding="utf-8")
         # The json goes last, so a board never sees it before its pack is there
         gh("release", "upload", TAG, str(pack), "--clobber", "-R", args.repository)
