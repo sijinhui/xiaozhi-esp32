@@ -34,9 +34,8 @@
 class ChatLcdDisplay : public SpiLcdDisplay {
 public:
     ChatLcdDisplay(esp_lcd_panel_io_handle_t io_handle, esp_lcd_panel_handle_t panel_handle,
-                   int width, int height, int offset_x, int offset_y, bool mirror_x,
-                   bool mirror_y, bool swap_xy, bool round_panel, bool touch_controls,
-                   bool rounder_align = false)
+                   int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y,
+                   bool swap_xy, bool round_panel, bool touch_controls, bool rounder_align = false)
         : SpiLcdDisplay(io_handle, panel_handle, width, height, offset_x, offset_y, mirror_x,
                         mirror_y, swap_xy),
           round_panel_(round_panel),
@@ -81,9 +80,7 @@ public:
     }
 
     // Loudness 0..100 of the microphone (true) or the speaker (false)
-    void SetAudioLevelSource(std::function<int(bool)> source) {
-        audio_level_ = std::move(source);
-    }
+    void SetAudioLevelSource(std::function<int(bool)> source) { audio_level_ = std::move(source); }
 
     // The base only shows an icon when muted; this one always shows the level
     virtual void UpdateStatusBar(bool update_all = false) override {
@@ -169,14 +166,14 @@ private:
         area->y2 = ((y2 >> 1) << 1) + 1;
     }
 
-    static constexpr int kEmojiTapMargin = 24;    // taps this close to the emoji still count
-    static constexpr int kTapSlop = 16;           // a press that moves further is a swipe
-    static constexpr int kVolumeArcSpan = 40;     // degrees above and below 3 o'clock
-    static constexpr int kVolumeArcInset = 6;     // gap between the arc and the panel edge
+    static constexpr int kEmojiTapMargin = 24;  // taps this close to the emoji still count
+    static constexpr int kTapSlop = 16;         // a press that moves further is a swipe
+    static constexpr int kVolumeArcSpan = 40;   // degrees above and below 3 o'clock
+    static constexpr int kVolumeArcInset = 6;   // gap between the arc and the panel edge
     static constexpr int kVolumeArcWidth = 10;
-    static constexpr int kVolumeZoneWidth = 72;   // touch band along the right edge
-    static constexpr int kVolumeDragStart = 8;    // movement before a touch becomes a drag
-    static constexpr int kVolumeStep = 5;         // fewer settings writes while dragging
+    static constexpr int kVolumeZoneWidth = 72;      // touch band along the right edge
+    static constexpr int kVolumeDragStart = 8;       // movement before a touch becomes a drag
+    static constexpr int kVolumeStep = 5;            // fewer settings writes while dragging
     static constexpr uint32_t kVolumeApplyMs = 120;  // at most this often while dragging
     static constexpr uint32_t kVolumeHideMs = 1500;
 
@@ -238,12 +235,12 @@ private:
         lv_obj_set_style_bg_opa(volume_label_, LV_OPA_70, 0);
         lv_obj_set_style_pad_hor(volume_label_, 10, 0);
         lv_obj_set_style_pad_ver(volume_label_, 4, 0);
-        lv_obj_align(volume_label_, LV_ALIGN_RIGHT_MID,
-                     -(kVolumeArcInset + kVolumeArcWidth + 14), 0);
+        lv_obj_align(volume_label_, LV_ALIGN_RIGHT_MID, -(kVolumeArcInset + kVolumeArcWidth + 14),
+                     0);
         lv_obj_add_flag(volume_label_, LV_OBJ_FLAG_HIDDEN);
 
-        int reach = static_cast<int>((width_ / 2) *
-                                     sinf(kVolumeArcSpan * static_cast<float>(M_PI) / 180));
+        int reach =
+            static_cast<int>((width_ / 2) * sinf(kVolumeArcSpan * static_cast<float>(M_PI) / 180));
         volume_zone_ = lv_obj_create(screen);
         lv_obj_set_size(volume_zone_, kVolumeZoneWidth, 2 * reach);
         lv_obj_align(volume_zone_, LV_ALIGN_RIGHT_MID, 0, 0);
@@ -280,7 +277,7 @@ private:
         if (mute_label_ == nullptr) {
             return;
         }
-        const char* icon = volume <= 0  ? MATERIAL_SYMBOLS_VOLUME_OFF
+        const char* icon = volume <= 0   ? MATERIAL_SYMBOLS_VOLUME_OFF
                            : volume < 34 ? MATERIAL_SYMBOLS_VOLUME_MUTE
                            : volume < 67 ? MATERIAL_SYMBOLS_VOLUME_DOWN
                                          : MATERIAL_SYMBOLS_VOLUME_UP;
@@ -299,8 +296,9 @@ private:
 
     // Maps a point to the volume at the same angle on the arc: top end 100, bottom 0
     int VolumeAtPoint(const lv_point_t& p) const {
-        float deg = atan2f(static_cast<float>(p.y - height_ / 2),
-                           static_cast<float>(p.x - width_ / 2)) * 180 / static_cast<float>(M_PI);
+        float deg =
+            atan2f(static_cast<float>(p.y - height_ / 2), static_cast<float>(p.x - width_ / 2)) *
+            180 / static_cast<float>(M_PI);
         deg = std::clamp(deg, -static_cast<float>(kVolumeArcSpan),
                          static_cast<float>(kVolumeArcSpan));
         float level = (kVolumeArcSpan - deg) / (2 * kVolumeArcSpan) * 100 / kVolumeStep;
@@ -402,7 +400,7 @@ private:
     static constexpr int kRectBottomMargin = 12;
     static constexpr int kRectTextMargin = 20;
     static constexpr int kRectTextGap = 12;
-    static constexpr int kRectEmojiSlot = 64;    // the 64px emoji of a rect board's assets pack draw unscaled
+    static constexpr int kRectEmojiSlot = 64;  // rect packs ship 64px emoji: drawn unscaled
     static constexpr int kRectBarGap = 14;
     static constexpr int kRectMinLines = 2;
 
@@ -423,12 +421,12 @@ private:
     };
 
     std::deque<ChatEntry> entries_;
-    std::vector<TextPos> pages_;    // where each page starts; a page repeats the
-                                    // previous page's last line, re-wrapped
-    size_t page_ = 0;               // page on screen
-    bool following_ = true;         // stay on the newest page
+    std::vector<TextPos> pages_;  // where each page starts; a page repeats the
+                                  // previous page's last line, re-wrapped
+    size_t page_ = 0;             // page on screen
+    bool following_ = true;       // stay on the newest page
     bool text_visible_ = false;
-    bool turn_open_ = false;        // the next answer sentence joins the last paragraph
+    bool turn_open_ = false;  // the next answer sentence joins the last paragraph
     lv_obj_t* text_box_ = nullptr;
     std::vector<lv_obj_t*> line_labels_;
     std::vector<int> line_widths_;  // widest each line may be, top line first
@@ -536,8 +534,8 @@ private:
 
         // The status line is as wide as the circle allows at its top edge
         int status_y = pill_y + pill_h + (round_panel_ ? kRowGap : 2);
-        int status_w = round_panel_ ? 2 * CircleExtent(cy - status_y, kEdgeMargin)
-                                    : width_ - 2 * kEdgeMargin;
+        int status_w =
+            round_panel_ ? 2 * CircleExtent(cy - status_y, kEdgeMargin) : width_ - 2 * kEdgeMargin;
         lv_obj_set_width(status_bar_, status_w);
         lv_obj_set_width(status_label_, status_w);
         lv_obj_set_width(notification_label_, status_w);
@@ -579,10 +577,9 @@ private:
             }
         }
         if (widths.empty()) {
-            widths.push_back(round_panel_
-                                 ? std::max(2 * CircleExtent(text_top - cy, kTextMargin),
-                                            4 * line_h)
-                                 : width_ - 2 * kRectTextMargin);
+            widths.push_back(
+                round_panel_ ? std::max(2 * CircleExtent(text_top - cy, kTextMargin), 4 * line_h)
+                             : width_ - 2 * kRectTextMargin);
         }
 
         if (log_layout) {
@@ -590,9 +587,8 @@ private:
                      "%s layout: pill y=%d-%d, status y=%d-%d w=%d, emoji y=%d-%d, "
                      "chat y=%d-%d, %d lines %d..%dpx",
                      round_panel_ ? "Round" : "Rect", pill_y, pill_y + pill_h, status_y,
-                     status_bottom, status_w,
-                     cy - shown_emoji_h / 2, cy + shown_emoji_h / 2, text_top,
-                     text_top + line_h * static_cast<int>(widths.size()),
+                     status_bottom, status_w, cy - shown_emoji_h / 2, cy + shown_emoji_h / 2,
+                     text_top, text_top + line_h * static_cast<int>(widths.size()),
                      static_cast<int>(widths.size()), widths.front(), widths.back());
         }
         if (text_top == text_top_ && line_h == line_height_ && widths == line_widths_) {
@@ -648,9 +644,8 @@ private:
     // Closing punctuation stays at the end of the previous line instead of starting one
     static bool NoLineStart(uint32_t cp) {
         static const uint32_t kClosing[] = {
-            ',',    '.',    '!',    '?',    ';',    ':',    ')',    ']',
-            0x2026, 0x3001, 0x3002, 0x300B, 0x300D, 0x300F, 0x3011, 0xFF01,
-            0xFF09, 0xFF0C, 0xFF1A, 0xFF1B, 0xFF1F, 0xFF5E,
+            ',',    '.',    '!',    '?',    ';',    ':',    ')',    ']',    0x2026, 0x3001, 0x3002,
+            0x300B, 0x300D, 0x300F, 0x3011, 0xFF01, 0xFF09, 0xFF0C, 0xFF1A, 0xFF1B, 0xFF1F, 0xFF5E,
         };
         return std::find(std::begin(kClosing), std::end(kClosing), cp) != std::end(kClosing);
     }
@@ -948,7 +943,7 @@ private:
     // ---- Voice bars: either side of the emoji, following the microphone while
     // listening and the speaker while speaking
 
-    static constexpr int kBarCount = 6;  // per side
+    static constexpr int kBarCount = 6;   // per side
     static constexpr int kBarInner = 84;  // first bar, from the centre (round panel)
     static constexpr int kBarPitch = 14;
     static constexpr int kBarWidth = 6;
@@ -1027,9 +1022,9 @@ private:
         for (int side = 0; side < 2; side++) {
             for (int i = 0; i < kBarCount; i++) {
                 int jitter = 85 + static_cast<int>(esp_random() % 31);
-                int h = self->bar_min_height_ +
-                        (self->bar_max_height_ - self->bar_min_height_) * self->bar_level_ *
-                            kShape[i] / 100 * jitter / 100 / 100;
+                int h = self->bar_min_height_ + (self->bar_max_height_ - self->bar_min_height_) *
+                                                    self->bar_level_ * kShape[i] / 100 * jitter /
+                                                    100 / 100;
                 h = std::clamp(h, self->bar_min_height_, self->bar_max_height_);
                 lv_obj_set_height(self->bars_[side * kBarCount + i], h);
             }
