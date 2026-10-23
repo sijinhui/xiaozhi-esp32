@@ -1,0 +1,121 @@
+{
+  "version":1,
+  "chip_model":"esp32s3",
+  "hide_subtitle":false,
+  "display_config": {
+    "width":320,
+    "height":240,
+    "monochrome":false,
+    "color": "RGB565"
+  },
+  "srmodels": "srmodels.bin",
+  "multinet_model": {
+    "language": "cn",
+    "duration": 3000,
+    "threshold": 0.4,
+    "commands": [
+      {
+        "command": "xiao si tong xue",
+        "text": "小司同学",
+        "action": "wake"
+      }
+    ]
+  },
+  "text_font": "font_puhui_common_20_4.bin",
+  "skin": {
+    "light": {
+      "text_color": "#000000",
+      "background_color": "#f5f5f4"
+    },
+    "dark": {
+      "text_color": "#ffffff",
+      "background_color": "#374151"
+    }
+  },
+  "emoji_collection": [
+    {
+      "name": "neutral",
+      "file": "neutral.gif"
+    },
+    {
+      "name": "happy",
+      "file": "happy.gif"
+    },
+    {
+      "name": "laughing",
+      "file": "laughing.gif"
+    },
+    {
+      "name": "funny",
+      "file": "funny.gif"
+    },
+    {
+      "name": "sad",
+      "file": "sad.gif"
+    },
+    {
+      "name": "angry",
+      "file": "angry.gif"
+    },
+    {
+      "name": "crying",
+      "file": "crying.gif"
+    },
+    {
+      "name": "loving",
+      "file": "loving.gif"
+    },
+    {
+      "name": "embarrassed",
+      "file": "embarrassed.gif"
+    },
+    {
+      "name": "surprised",
+      "file": "surprised.gif"
+    },
+    {
+      "name": "shocked",
+      "file": "shocked.gif"
+    },
+    {
+      "name": "thinking",
+      "file": "thinking.gif"
+    },
+    {
+      "name": "winking",
+      "file": "winking.gif"
+    },
+    {
+      "name": "cool",
+      "file": "cool.gif"
+    },
+    {
+      "name": "relaxed",
+      "file": "relaxed.gif"
+    },
+    {
+      "name": "delicious",
+      "file": "delicious.gif"
+    },
+    {
+      "name": "kissy",
+      "file": "kissy.gif"
+    },
+    {
+      "name": "confident",
+      "file": "confident.gif"
+    },
+    {
+      "name": "sleepy",
+      "file": "sleepy.gif"
+    },
+    {
+      "name": "silly",
+      "file": "silly.gif"
+    },
+    {
+      "name": "confused",
+      "file": "confused.gif"
+    }
+  ]
+}

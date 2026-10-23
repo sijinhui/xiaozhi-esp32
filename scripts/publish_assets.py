@@ -7,8 +7,8 @@ CheckGithubAssets). A folder is packed first (scripts/pack_assets.py); without
 a pack the board's folder in the repo is used. Needs a logged-in gh.
 
     python scripts/publish_assets.py
+    python scripts/publish_assets.py --board lichuang-dev
     python scripts/publish_assets.py assets.bin
-    python scripts/publish_assets.py assets.bin --board lichuang-dev
 """
 
 import argparse
@@ -28,6 +28,7 @@ DEFAULT_REPOSITORY = "sijinhui/xiaozhi-esp32"
 ROOT = Path(__file__).resolve().parents[1]
 BOARD_PACKS = {
     DEFAULT_BOARD: ROOT / "main/boards/waveshare/esp32-s3-touch-amoled-1.75/assets/xiaosi",
+    "lichuang-dev": ROOT / "main/boards/lckfb/szpi-esp32s3/assets/xiaosi",
 }
 HEADER_SIZE = 12
 TABLE_ENTRY_SIZE = 44

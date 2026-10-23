@@ -42,10 +42,16 @@ class PublishAssetsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "长度"):
             publish_assets.describe_pack(bytes(data[:-1]))
 
-    def test_repo_pack_of_default_board_is_valid(self):
-        data = publish_assets.read_pack(publish_assets.BOARD_PACKS[publish_assets.DEFAULT_BOARD])
-        index = publish_assets.describe_pack(data)
-        self.assertTrue(index["multinet_model"]["commands"])
+    def test_repo_packs_are_valid_and_fit_their_partition(self):
+        # assets partition of each board's partition table (partitions/v2)
+        limits = {publish_assets.DEFAULT_BOARD: 16 * 1024 * 1024, "lichuang-dev": 8 * 1024 * 1024}
+        self.assertEqual(set(publish_assets.BOARD_PACKS), set(limits))
+        for board, folder in publish_assets.BOARD_PACKS.items():
+            with self.subTest(board=board):
+                data = publish_assets.read_pack(folder)
+                index = publish_assets.describe_pack(data)
+                self.assertTrue(index["multinet_model"]["commands"])
+                self.assertLessEqual(len(data), limits[board])
 
     def test_release_json_names_the_whole_file(self):
         data = bytes(pack({"index.json": b"{}"}))
