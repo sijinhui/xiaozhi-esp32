@@ -125,12 +125,17 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
     // lv image cache, currently only PNG is supported
     size_t psram_size_mb = esp_psram_get_size() / 1024 / 1024;
     if (psram_size_mb >= 8) {
+        // 2MB of decoded images on a 466x466 panel, less on smaller ones (never
+        // under 512KB): a MultiNet wake word needs about 4MB of the same PSRAM.
+        const size_t full_area = 466 * 466;
+        const size_t area = std::min<size_t>(static_cast<size_t>(width_) * height_, full_area);
+        const size_t image_cache_kb = std::max<size_t>(2048 * area / full_area, 512);
 #if CONFIG_LV_USE_BUILTIN_MALLOC
         // Base TLSF pool is CONFIG_LV_MEM_SIZE_KILOBYTES in PSRAM; grow it so
-        // the 2MB decoded-image cache does not exhaust a 2MB-PSRAM-safe pool.
+        // the decoded-image cache does not exhaust a 2MB-PSRAM-safe pool.
         // TLSF rejects any single pool larger than LV_MEM_SIZE when
         // LV_MEM_POOL_EXPAND_SIZE is 0 (block_size_max = 1 << ceil(log2(LV_MEM_SIZE))).
-        const size_t extra_total = 2560 * 1024;
+        const size_t extra_total = image_cache_kb * 1024 * 5 / 4;
         const size_t chunk_size = LV_MEM_SIZE;
         size_t added = 0;
         while (added < extra_total) {
@@ -153,8 +158,8 @@ SpiLcdDisplay::SpiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_h
             ESP_LOGI(TAG, "Added %uKB LVGL pool in PSRAM", (unsigned)(added / 1024));
         }
 #endif
-        lv_image_cache_resize(2 * 1024 * 1024, true);
-        ESP_LOGI(TAG, "Use 2MB of PSRAM for image cache");
+        lv_image_cache_resize(image_cache_kb * 1024, true);
+        ESP_LOGI(TAG, "Use %uKB of PSRAM for image cache", (unsigned)image_cache_kb);
     } else if (psram_size_mb >= 2) {
         lv_image_cache_resize(512 * 1024, true);
         ESP_LOGI(TAG, "Use 512KB of PSRAM for image cache");
