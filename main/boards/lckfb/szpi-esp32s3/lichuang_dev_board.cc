@@ -1,6 +1,7 @@
 #include "wifi_board.h"
 #include "codecs/box_audio_codec.h"
-#include "display/lcd_display.h"
+#include "codecs/metered_box_audio_codec.h"
+#include "display/chat_lcd_display.h"
 #include "display/emote_display.h"
 #include "application.h"
 #include "button.h"
@@ -34,19 +35,20 @@ public:
     }
 };
 
-class CustomAudioCodec : public BoxAudioCodec {
+class CustomAudioCodec : public MeteredBoxAudioCodec {
 private:
     Pca9557* pca9557_;
 
 public:
     CustomAudioCodec(i2c_master_bus_handle_t i2c_bus, Pca9557* pca9557)
-        : BoxAudioCodec(i2c_bus, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
-                        AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
-                        AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, GPIO_NUM_NC,
-                        AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR, AUDIO_INPUT_REFERENCE,
-                        28.0f,  // Physical MIC1 gain
-                        2,      // Physical MIC3 is the playback reference input
-                        0.0f),
+        : MeteredBoxAudioCodec(i2c_bus, AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
+                               AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
+                               AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, GPIO_NUM_NC,
+                               AUDIO_CODEC_ES8311_ADDR, AUDIO_CODEC_ES7210_ADDR,
+                               AUDIO_INPUT_REFERENCE,
+                               28.0f,  // Physical MIC1 gain
+                               2,      // Physical MIC3 is the playback reference input
+                               0.0f),
           pca9557_(pca9557) {}
 
     virtual void EnableOutput(bool enable) override {
@@ -65,6 +67,7 @@ private:
     i2c_master_dev_handle_t pca9557_handle_;
     Button boot_button_;
     Display* display_;
+    ChatLcdDisplay* chat_display_ = nullptr;
     Pca9557* pca9557_;
     Esp32Camera* camera_;
     PressToTalkMcpTool* press_to_talk_tool_ = nullptr;
@@ -170,8 +173,16 @@ private:
 #if CONFIG_USE_EMOTE_MESSAGE_STYLE
         display_ = new emote::EmoteDisplay(panel, panel_io, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 #else
-        display_ = new SpiLcdDisplay(panel_io, panel,
-            DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
+        // The same chat/voice-bar UI as the round touch prototype, re-laid-out
+        // for this rectangular panel. The emoji-tap and volume-arc gestures stay
+        // disabled, so the BOOT button remains the only chat control. (A unit
+        // whose LCD does carry FT5x06 touch still gets swipe-to-page through
+        // the shared class's screen-gesture handler.)
+        display_ = new ChatLcdDisplay(
+            panel_io, panel, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_OFFSET_X, DISPLAY_OFFSET_Y,
+            DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY,
+            /*round_panel=*/false, /*touch_controls=*/false);
+        chat_display_ = static_cast<ChatLcdDisplay*>(display_);
 #endif
     }
 
@@ -285,6 +296,12 @@ public:
         InitializeSpi();
         InitializeSt7789Display();
         InitializeTouch();
+        if (chat_display_ != nullptr) {
+            chat_display_->SetAudioLevelSource([this](bool input) {
+                auto codec = static_cast<CustomAudioCodec*>(GetAudioCodec());
+                return input ? codec->input_level() : codec->output_level();
+            });
+        }
         InitializeButtons();
         InitializeCamera();
         InitializeTools();
