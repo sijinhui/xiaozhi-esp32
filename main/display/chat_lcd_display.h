@@ -125,13 +125,14 @@ public:
         }
     }
 
-    virtual void SetEmotion(const char* emotion) override {
+    virtual bool SetEmotion(const char* emotion) override {
         DisplayLockGuard lock(this);
-        SpiLcdDisplay::SetEmotion(emotion);
+        bool shown = SpiLcdDisplay::SetEmotion(emotion);
         // A bigger emoji pushes the lines down; only then re-lay the pages
         if (UpdateChatLayout(false)) {
             OnContentChanged(true);
         }
+        return shown;
     }
 
     virtual void SetTheme(Theme* theme) override {
